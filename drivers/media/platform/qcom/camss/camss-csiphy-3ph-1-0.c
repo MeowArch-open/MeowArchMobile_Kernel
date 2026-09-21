@@ -1160,6 +1160,10 @@ static void csiphy_lanes_enable(struct csiphy_device *csiphy,
 
 	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
 
+	dev_info(csiphy->camss->dev,
+		"CSIPHYDBG: link_freq=%lld settle_cnt=%u lane_mask=0x%x num_data=%d timer_clk=%u\n",
+		link_freq, settle_cnt, lane_mask, c->num_data, csiphy->timer_clk_rate);
+
 	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
 	for (i = 0; i < c->num_data; i++)
 		val |= BIT(c->data[i].pos * 2);
