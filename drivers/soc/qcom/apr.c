@@ -132,6 +132,10 @@ static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, const struct gpr_
 
 	hdr = &pkt->hdr;
 
+	if (pr->type == PR_TYPE_GPR)
+		pr_info("gpr_dbg: send dst_port %#x src_port %#x opcode %#x token %#x via svc->id %#x\n",
+			hdr->dest_port, hdr->src_port, hdr->opcode, hdr->token, svc->id);
+
 	spin_lock_irqsave(&svc->lock, flags);
 	ret = rpmsg_trysend(pr->ch, pkt, hdr->pkt_size);
 	spin_unlock_irqrestore(&svc->lock, flags);
@@ -301,8 +305,26 @@ static int gpr_do_rx_callback(struct packet_router *gpr, struct apr_rx_buf *abuf
 	spin_unlock_irqrestore(&gpr->svcs_lock, flags);
 
 	if (!svc) {
+		/*
+		 * Every APM command on this board times out with one of these in
+		 * between, so print enough to tell the three candidates apart:
+		 * the DSP answering a port we never used, the port having been
+		 * removed from under us (apr_device_remove() does that on any
+		 * driver unbind), or the reply landing on a different router
+		 * instance than the one the services were added to.
+		 */
+		struct pkt_router_svc *e;
+		int id;
+
 		dev_err(gpr->dev, "GPR: Port(%x) is not registered\n",
 			hdr->dest_port);
+		pr_info("gpr_dbg: dropped pkt dst_port %#x src_port %#x opcode %#x token %#x on router %p\n",
+			hdr->dest_port, hdr->src_port, hdr->opcode, hdr->token, gpr);
+		spin_lock_irqsave(&gpr->svcs_lock, flags);
+		idr_for_each_entry(&gpr->svcs_idr, e, id)
+			pr_info("gpr_dbg:   registered id %#x svc->id %#x dev %s\n",
+				id, e->id, e->dev ? dev_name(e->dev) : "(none)");
+		spin_unlock_irqrestore(&gpr->svcs_lock, flags);
 		return -EINVAL;
 	}
 
@@ -382,6 +404,13 @@ static void apr_device_remove(struct device *dev)
 
 	if (adrv->remove)
 		adrv->remove(adev);
+	/*
+	 * Note this runs on driver unbind, not only on device removal, and the
+	 * idr entry belongs to the device -- so an unbind leaves a live device
+	 * whose port can no longer receive anything.
+	 */
+	pr_info("gpr_dbg: apr_device_remove %s -> idr_remove id %#x\n",
+		dev_name(dev), adev->svc.id);
 	spin_lock(&apr->svcs_lock);
 	idr_remove(&apr->svcs_idr, adev->svc.id);
 	spin_unlock(&apr->svcs_lock);
@@ -470,6 +499,8 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	}
 
 	dev_info(dev, "Adding APR/GPR dev: %s\n", dev_name(&adev->dev));
+	pr_info("gpr_dbg: registered svc_id %#x (idr id %d) as %s on router %p\n",
+		svc_id, ret, dev_name(&adev->dev), apr);
 
 	ret = device_register(&adev->dev);
 	if (ret) {
@@ -577,6 +608,8 @@ static int apr_remove_device(struct device *dev, void *svc_path)
 static void apr_pd_status(int state, char *svc_path, void *priv)
 {
 	struct packet_router *apr = (struct packet_router *)priv;
+
+	pr_info("gpr_dbg: pd_status state %d path %s router %p\n", state, svc_path, apr);
 
 	switch (state) {
 	case SERVREG_SERVICE_STATE_UP:

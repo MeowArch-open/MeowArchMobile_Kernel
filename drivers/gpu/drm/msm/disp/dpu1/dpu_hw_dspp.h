@@ -72,6 +72,13 @@ struct dpu_hw_dspp_ops {
 	 */
 	void (*setup_gc)(struct dpu_hw_dspp *ctx, struct dpu_hw_gc_lut *gc_lut);
 
+	/**
+	 * setup_spr - enable or bypass the sub-pixel rendering block
+	 * @ctx: Pointer to dspp context
+	 * @enable: true to program and enable SPR, false to bypass it
+	 */
+	void (*setup_spr)(struct dpu_hw_dspp *ctx, bool enable);
+
 };
 
 /**

@@ -58,9 +58,92 @@
 #define DSC_DATA_IN_SWAP           0x08
 #define DSC_CLK_CTRL               0x0C
 
+/*
+ * Two things in ENC_DF_CTRL that the vendor driver programs and this one does not.
+ * Both only bite on detailed content -- flat colour never uses the rate budget and
+ * never exercises the indexed colour history -- which is exactly how zorn's panel
+ * fails: solid fills are pixel-perfect, dense text corrupts once per slice row.
+ *
+ * dsc_ob_max_addr: the DSC output buffer's maximum address. Upstream halves it
+ *	whenever the block merely *has* the native 4:2:x capability:
+ *
+ *		max_addr = 2400 / num_softslice;
+ *		if (features & BIT(DPU_DSC_NATIVE_42x_EN)) max_addr /= 2;
+ *
+ *	and the SM8650 catalog sets that bit on dce_0_0/dce_0_1, so we program 1199.
+ *	The vendor uses the 4:2:2 bit only to choose a table row and halves on a
+ *	*separate* capability (SDE_DSC_REDUCED_OB_MAX):
+ *
+ *		if (!(features & BIT(SDE_DSC_NATIVE_422_EN)))
+ *			if (num_ss == 1) return reduced_ob_max ? 1199 : 2399;
+ *
+ *	We are RGB, not 4:2:2, so the vendor value is 2399 unless this SoC sets
+ *	has_reduced_ob_max. A half-size output FIFO overflows precisely when the
+ *	compressed data is large. 0 = keep upstream's formula.
+ *
+ * dsc_full_ich_prec: BIT(12), full indexed-colour-history precision. The vendor
+ *	sets it when the DPU is >= A00 (ours reports revision 0xa0000000) and
+ *	bits_per_component > 8 (ours is 10):
+ *
+ *		if (test_bit(SDE_DSC_FULL_ICH_PREC, &caps->features) &&
+ *		    dsc->config.bits_per_component > 8)
+ *			data |= BIT(12);
+ *
+ *	Upstream has no notion of it and never sets it. ICH caches recently used
+ *	pixel values within a slice, so it is dormant on a flat fill and heavily
+ *	used on text; running it at reduced precision while the PPS declares 10 bpc
+ *	makes the reconstruction drift per slice.
+ */
+static uint dsc_ob_max_addr;
+module_param(dsc_ob_max_addr, uint, 0600);
+MODULE_PARM_DESC(dsc_ob_max_addr,
+		 "Force the DSC output buffer max address (0 = upstream formula)");
+
+static bool dsc_full_ich_prec;
+module_param(dsc_full_ich_prec, bool, 0600);
+MODULE_PARM_DESC(dsc_full_ich_prec,
+		 "Set ENC_DF_CTRL BIT(12), full ICH precision, as the vendor does for >8 bpc");
+
+/*
+ * Dump the DSC encoder block after configuring it, for a field-by-field diff
+ * against the same registers read off a running vendor stack. Off by default --
+ * this runs on every kickoff, and left on it fills dmesg fast enough to keep
+ * journald writing continuously.
+ */
+static bool dsc_dump_regs;
+module_param(dsc_dump_regs, bool, 0600);
+MODULE_PARM_DESC(dsc_dump_regs,
+		 "dump the DSC encoder registers after each config; noisy");
+
+/*
+ * DSC_CFG BIT(17). Upstream sets it for every command-mode panel. The vendor
+ * touches that bit only inside its 4HS-merge path, where it means the opposite
+ * (1 = *video* mode) and belongs to a group -- BIT(16) 4HS-merge-enable,
+ * bits[21:18] padding, bits[25:22] alignment -- that is only written when
+ * dsc_4hsmerge_en is set. zorn has two DSC blocks, not four, so 4HS merge is off
+ * and the vendor's value for this bit is 0.
+ *
+ * Default off, i.e. the vendor's value. The register is rewritten every frame
+ * from dpu_hw_dsc_config_1_2(), so this parameter takes effect on the next frame
+ * with no modeset needed.
+ */
+static bool dsc_cfg_bit17;
+module_param(dsc_cfg_bit17, bool, 0600);
+MODULE_PARM_DESC(dsc_cfg_bit17,
+		 "set DSC_CFG BIT(17) in command mode (upstream behaviour; vendor leaves it clear)");
+
+/* -1 leaves DSC_DATA_IN_SWAP at its reset value; see where it is written. */
+static int dsc_data_in_swap = -1;
+module_param(dsc_data_in_swap, int, 0600);
+MODULE_PARM_DESC(dsc_data_in_swap,
+		 "value to program into DSC_DATA_IN_SWAP (-1 = leave at reset)");
+
 static int _dsc_calc_output_buf_max_addr(struct dpu_hw_dsc *hw_dsc, int num_softslice)
 {
 	int max_addr = 2400 / num_softslice;
+
+	if (dsc_ob_max_addr)
+		return dsc_ob_max_addr;
 
 	if (hw_dsc->caps->features & BIT(DPU_DSC_NATIVE_42x_EN))
 		max_addr /= 2;
@@ -124,6 +207,9 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	data |= (_dsc_calc_output_buf_max_addr(hw_dsc, num_active_slice_per_enc) << 18);
 
+	if (dsc_full_ich_prec && dsc->bits_per_component > 8)
+		data |= BIT(12);
+
 	DPU_REG_WRITE(hw, sblk->enc.base + ENC_DF_CTRL, data);
 
 	data = (dsc->dsc_version_minor & 0xf) << 28;
@@ -154,6 +240,29 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_MAIN_CONF, data);
 
+	/*
+	 * MAIN_CONF is the register that decides how the panel's decoder reads the
+	 * chroma channels, so it is the one worth seeing. It is printed rather than
+	 * read back because there is no safe way to read it from userspace on this
+	 * SoC: /dev/mem works only while the DPU happens to be powered, and a
+	 * command-mode panel idle-collapses it between one syscall and the next --
+	 * reading it collapsed is an unclocked access that TZ answers with a hard
+	 * reset, no log, no panic. pr_info and not a debug print because a wrong
+	 * value here costs a reboot to discover.
+	 *
+	 * Only on change: this runs from prepare_for_kickoff, i.e. every frame on
+	 * both DSC blocks, and at 120 Hz that is ~240 lines a second -- enough to
+	 * push the interesting part of the boot out of the ring buffer, which it
+	 * did.
+	 */
+	if (data != hw_dsc->last_main_conf) {
+		hw_dsc->last_main_conf = data;
+		pr_info("dpu_dsc: MAIN_CONF %#010x  bpc %u lbd %u bpp %u/16 native_422 %d native_420 %d convert_rgb %d block_pred %d dsc 1.%u\n",
+			data, dsc->bits_per_component, dsc->line_buf_depth,
+			dsc->bits_per_pixel, dsc->native_422, dsc->native_420,
+			dsc->convert_rgb, dsc->block_pred_enable,
+			dsc->dsc_version_minor);
+	}
 	data = (dsc->pic_width & 0xffff) |
 		((dsc->pic_height & 0xffff) << 16);
 
@@ -232,10 +341,50 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 		data |= BIT(12);
 	if (mode & DSC_MODE_MULTIPLEX)
 		data |= BIT(13);
-	if (!(mode & DSC_MODE_VIDEO))
+	if (dsc_cfg_bit17 && !(mode & DSC_MODE_VIDEO))
 		data |= BIT(17);
 
 	DPU_REG_WRITE(hw, sblk->ctl.base + DSC_CFG, data);
+
+	/*
+	 * DSC_DATA_IN_SWAP is never written by either stack -- upstream and the
+	 * vendor both only #define it -- so it sits at its reset value. Its name is
+	 * the only documentation there is, and it is the one register left on the
+	 * path that could plausibly decide which input channels the wrapper reads.
+	 * That matters because on zorn the wrapper emits only two components: a
+	 * full-rate Y from channel 1 and one half-rate chroma from the horizontal
+	 * average of channel 2, with channel 0 never sampled. Measured over
+	 * eighteen swatches (nine plain, nine with red forced into the odd-column
+	 * blue slot), output is always (C, G, C) with C = avg(P0.b, P1.b).
+	 *
+	 * Writable so the value can be swept without a rebuild: the register is
+	 * rewritten every frame from here, so a new value lands on the next frame.
+	 * -1 leaves the reset value alone.
+	 */
+	if (dsc_data_in_swap >= 0)
+		DPU_REG_WRITE(hw, sblk->ctl.base + DSC_DATA_IN_SWAP,
+			      (u32)dsc_data_in_swap);
+
+	/*
+	 * Read back rather than log what was written: DATA_IN_SWAP's reset value is
+	 * the unknown, and CMN_MAIN_CNF and the wrapper's DSC_CFG have no Android
+	 * counterpart to compare against -- sde_dbg on the vendor kernel refuses
+	 * offsets outside the two encoder sub-blocks, so these three have never been
+	 * seen on a working stack. Only on change, for the reason MAIN_CONF is.
+	 */
+	{
+		u32 cfg_rb = DPU_REG_READ(hw, sblk->ctl.base + DSC_CFG);
+		u32 swap_rb = DPU_REG_READ(hw, sblk->ctl.base + DSC_DATA_IN_SWAP);
+		u32 cmn_rb = DPU_REG_READ(hw, DSC_CMN_MAIN_CNF);
+
+		if (cfg_rb != hw_dsc->last_ctl_cfg ||
+		    swap_rb != hw_dsc->last_data_in_swap) {
+			hw_dsc->last_ctl_cfg = cfg_rb;
+			hw_dsc->last_data_in_swap = swap_rb;
+			pr_info("dpu_dsc: DSC_CFG %#010x DATA_IN_SWAP %#010x CMN_MAIN_CNF %#010x\n",
+				cfg_rb, swap_rb, cmn_rb);
+		}
+	}
 }
 
 static void dpu_hw_dsc_config_thresh_1_2(struct dpu_hw_dsc *hw_dsc,
@@ -244,6 +393,7 @@ static void dpu_hw_dsc_config_thresh_1_2(struct dpu_hw_dsc *hw_dsc,
 	struct dpu_hw_blk_reg_map *hw;
 	const struct dpu_dsc_sub_blks *sblk;
 	struct drm_dsc_rc_range_parameters *rc;
+	u32 off;
 
 	if (!hw_dsc || !dsc)
 		return;
@@ -341,6 +491,29 @@ static void dpu_hw_dsc_config_thresh_1_2(struct dpu_hw_dsc *hw_dsc,
 		      (rc[12].range_bpg_offset << 12) |
 		      (rc[13].range_bpg_offset << 18) |
 		      (rc[14].range_bpg_offset << 24));
+
+	/*
+	 * The whole encoder block, read back after everything is written, so it
+	 * can be diffed field by field against the same registers read off a
+	 * running Android. Off by default: this is called on every kickoff, not
+	 * once per modeset, and left on it floods dmesg badly enough to matter
+	 * (thousands of dumps within a minute, journald writing continuously).
+	 *
+	 *	echo 1 > /sys/module/msm/parameters/dsc_dump_regs
+	 *
+	 * Offsets are printed relative to the DSC block, so
+	 * "dmesg | grep 'dpu_dsc 0'" lines up with a dpu-snapshot.py capture
+	 * rebased on 0x0ae81000. Reading here is safe -- the block is being
+	 * configured, so it is necessarily powered.
+	 */
+	if (dsc_dump_regs)
+		for (off = 0; off < 0x80; off += 16)
+			pr_info("dpu_dsc %08x: %08x %08x %08x %08x\n",
+				sblk->enc.base + off,
+				DPU_REG_READ(hw, sblk->enc.base + off),
+				DPU_REG_READ(hw, sblk->enc.base + off + 4),
+				DPU_REG_READ(hw, sblk->enc.base + off + 8),
+				DPU_REG_READ(hw, sblk->enc.base + off + 12));
 }
 
 static void dpu_hw_dsc_bind_pingpong_blk_1_2(struct dpu_hw_dsc *hw_dsc,

@@ -2048,6 +2048,17 @@ config SND_SOC_SI476X
 	tristate
 	depends on MFD_SI476X_CORE
 
+config SND_SOC_SIA91XX
+	tristate "Silicon Integrated SIA91xx Speaker Amplifier"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Enable support for the Silicon Integrated SIA91xx family of digital
+	  smart speaker amplifiers, as found on several Xiaomi phones. The part
+	  is identified by its identity register; only SIA9187 is recognised so
+	  far, because that is the only one whose identity range has been
+	  confirmed against hardware.
+
 config SND_SOC_SIGMADSP
 	tristate
 	select CRC32

@@ -135,7 +135,23 @@ static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
 	[IPA_ENDPOINT_AP_MODEM_RX] = {
 		.ee_id		= GSI_EE_AP,
 		.channel_id	= 1,
-		.endpoint_id	= 23,
+		/* zorn (SM8650): this was 23, which is not the pipe GSI channel
+		 * 1 belongs to.  Qualcomm's own table for IPA v5.5 pairs
+		 * APPS_WAN_CONS with (pipe 24, channel 1) and
+		 * APPS_WAN_COAL_CONS -- the coalescing consumer -- with
+		 * (pipe 23, channel 4); every other endpoint here matches a
+		 * real (pipe, channel) tuple, these two consumers did not.
+		 *
+		 * The endpoint id is what indexes the pipe's configuration
+		 * registers, and it is what the modem is told to address: the
+		 * ctrl_comm_dest_end_pt we send in INIT_DRIVER comes straight
+		 * from here.  So the AP was configuring pipe 23 while driving
+		 * pipe 24's channel, and the modem was sending downlink to a
+		 * pipe the AP never armed a channel for -- which is why not one
+		 * frame ever arrived and GSI raised no receive events at all,
+		 * while uplink, whose (pipe 2, channel 11) is right, worked.
+		 */
+		.endpoint_id	= 24,
 		.toward_ipa	= false,
 		.channel = {
 			.tre_count	= 256,
@@ -168,7 +184,13 @@ static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
 	[IPA_ENDPOINT_MODEM_AP_RX] = {
 		.ee_id		= GSI_EE_MODEM,
 		.channel_id	= 7,
-		.endpoint_id	= 21,
+		/* Same mismatch as AP_MODEM_RX above: Q6_WAN_CONS is
+		 * (pipe 22, channel 7), while pipe 21 is Q6_UL_NLO_ACK_CONS on
+		 * channel 6.  This endpoint is what AP_MODEM_TX names as its
+		 * status endpoint, so getting it wrong points IPA's transmit
+		 * status reports at the wrong pipe.
+		 */
+		.endpoint_id	= 22,
 		.toward_ipa	= false,
 	},
 	[IPA_ENDPOINT_MODEM_DL_NLO_TX] = {
@@ -446,8 +468,20 @@ static const struct ipa_mem ipa_mem_local_data[] = {
 static const struct ipa_mem_data ipa_mem_data = {
 	.local_count	= ARRAY_SIZE(ipa_mem_local_data),
 	.local		= ipa_mem_local_data,
-	.imem_addr	= 0x14688000,
-	.imem_size	= 0x00002000,
+	/*
+	 * zorn (SM8650): the modem programs IPA to touch IMEM at 0x14684080,
+	 * which the upstream 0x14688000+0x2000 window does not cover, so the
+	 * transfer takes a stage-1 translation fault on the IPA SID:
+	 *   arm-smmu 15000000.iommu: Unhandled context fault: fsr=0x402
+	 *     [Format=2 TF], iova=0x14684080, SID=0x4a0
+	 * IPA then raises its fatal IRQ and the modem asserts in
+	 * ipa_hal.c:3109 the instant DMS operating mode goes online.
+	 * Downstream identity-maps 0x14683000+0x2000 into the same context
+	 * bank (ipa_smmu_ap's qcom,additional-mapping), so widen the window to
+	 * the union of both rather than moving it.
+	 */
+	.imem_addr	= 0x14683000,
+	.imem_size	= 0x00007000,
 	.smem_size	= 0x0000b000,
 };
 

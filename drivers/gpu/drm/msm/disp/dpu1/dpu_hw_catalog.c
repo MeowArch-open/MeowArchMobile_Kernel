@@ -425,6 +425,31 @@ static const struct dpu_dspp_sub_blks sdm845_dspp_sblk = {
 		.len = 0x40, .version = 0x10008},
 };
 
+/*
+ * SPR sits outside the DSPP register window even though downstream addresses it
+ * as a DSPP sub-block. The DSPP bases step by 0x2000 while the SPR blocks step
+ * by 0x1000, so the offset has to shrink by 0x1000 per DSPP for dspp_base +
+ * spr_base to land on the right block -- these four values are
+ * qcom,sde-dspp-spr-off = <0x15400 0x14400 0x13400 0x12400> from the vendor DT,
+ * rebased by the 0x1000 between mdss and mdp. One shared offset silently aims
+ * the second mixer's writes at the third SPR block and leaves SPR_1 disabled,
+ * which on a two-mixer panel means the right half of the screen has no SPR.
+ */
+#define SM8650_DSPP_SBLK(_spr_base)					\
+	{								\
+		.pcc = {.name = "pcc", .base = 0x1700,			\
+			.len = 0x90, .version = 0x40000},		\
+		.gc = {.name = "gc", .base = 0x17c0,			\
+			.len = 0x40, .version = 0x10008},		\
+		.spr = {.name = "spr", .base = _spr_base,		\
+			.len = 0x200, .version = 0x20000},		\
+	}
+
+static const struct dpu_dspp_sub_blks sm8650_dspp_sblk_0 = SM8650_DSPP_SBLK(0x15400);
+static const struct dpu_dspp_sub_blks sm8650_dspp_sblk_1 = SM8650_DSPP_SBLK(0x14400);
+static const struct dpu_dspp_sub_blks sm8650_dspp_sblk_2 = SM8650_DSPP_SBLK(0x13400);
+static const struct dpu_dspp_sub_blks sm8650_dspp_sblk_3 = SM8650_DSPP_SBLK(0x12400);
+
 static const struct dpu_dspp_sub_blks sm8750_dspp_sblk = {
 	.pcc = {.name = "pcc", .base = 0x1700,
 		.len = 0x90, .version = 0x60000},
