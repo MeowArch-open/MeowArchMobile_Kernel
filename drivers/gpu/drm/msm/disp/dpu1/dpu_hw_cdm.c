@@ -201,6 +201,17 @@ static int dpu_hw_cdm_enable(struct dpu_hw_cdm *ctx, struct dpu_hw_cdm_cfg *cdm)
 
 	DPU_REG_WRITE(c, CDM_CSC_10_OPMODE, csc);
 	DPU_REG_WRITE(c, CDM_HDMI_PACK_OP_MODE, opmode);
+
+	/*
+	 * Printed for the same reason the DSC one is: on a command-mode panel
+	 * these registers cannot be read back from userspace without risking an
+	 * unclocked access, and a wrong value here costs a reboot to find.
+	 */
+	pr_info("dpu_cdm: %ux%u %p4cc h_cdwn %u v_cdwn %u depth %u out_type %u CSC_OPMODE %#x PACK_OPMODE %#x\n",
+		cdm->output_width, cdm->output_height, &fmt->pixel_format,
+		cdm->h_cdwn_type, cdm->v_cdwn_type, cdm->output_bit_depth,
+		cdm->output_type, csc, opmode);
+
 	return 0;
 }
 

@@ -27,11 +27,26 @@ struct q6apm_dai_priv_data {
 	bool mclk_enabled, bclk_enabled;
 };
 
+/*
+ * Bit-clock for the external SECONDARY MI2S/TDM interface (SIA9187 speaker amp).
+ * Nobody in the q6apm/AudioReach path enables it -- unlike CODEC_DMA, whose macro
+ * MCLKs come up on their own -- so the ADSP configures the LPAIF but never toggles
+ * BCLK/LRCLK on gpio121/123 and the amp sees no clock (its reg 0x01 bit4 stays 0).
+ * We clk_prepare_enable the q6prm SEC_MI2S_IBIT clock at prepare and drop it at
+ * shutdown. 0 = auto: 4 slots x 16 bit x fs (= 3.072 MHz at 48 kHz). Override at
+ * runtime to retune without a rebuild.
+ */
+static int sec_bclk_rate;
+module_param(sec_bclk_rate, int, 0644);
+MODULE_PARM_DESC(sec_bclk_rate, "SEC MI2S/TDM bit clock in Hz (0 = auto: nslots*width*fs)");
+
 struct q6apm_lpass_dai_data {
 	struct q6apm_graph *graph[APM_PORT_MAX];
 	bool is_port_started[APM_PORT_MAX];
 	struct audioreach_module_config module_config[APM_PORT_MAX];
 	struct q6apm_dai_priv_data priv[APM_PORT_MAX];
+	struct clk *sec_mi2s_bclk;
+	bool bclk_on[APM_PORT_MAX];
 };
 
 static void q6apm_lpass_dai_disable_clocks(struct q6apm_lpass_dai_data *dai_data, int id)
@@ -179,7 +194,87 @@ static int q6dma_hw_params(struct snd_pcm_substream *substream,
 	cfg->num_channels = channels;
 	audioreach_set_default_channel_mapping(cfg->channel_map, channels);
 
+	dev_info(dai->dev,
+		 "q6dma_dbg: dai %d bit_width %d rate %d channels %d\n",
+		 dai->id, cfg->bit_width, cfg->sample_rate, cfg->num_channels);
+
 	return 0;
+}
+
+static void q6apm_lpass_put_clk(void *clk)
+{
+	clk_put(clk);
+}
+
+/*
+ * Fetch the SEC MI2S/TDM bit clock directly from the q6prm-lpass-clocks
+ * provider by its <clock-id clock-attribute> cell values, so no "clocks"
+ * phandle has to be added to the bedais DT node. Returns NULL when the
+ * provider node is absent (all other boards), or ERR_PTR to defer/fail.
+ */
+static struct clk *q6apm_lpass_get_sec_bclk(struct device *dev)
+{
+	struct of_phandle_args clkspec;
+	struct device_node *np;
+	struct clk *clk;
+
+	np = of_find_compatible_node(NULL, NULL, "qcom,q6prm-lpass-clocks");
+	if (!np)
+		return NULL;
+
+	clkspec.np = np;
+	clkspec.args_count = 2;
+	clkspec.args[0] = LPASS_CLK_ID_SEC_MI2S_IBIT;
+	clkspec.args[1] = LPASS_CLK_ATTRIBUTE_COUPLE_NO;
+
+	clk = of_clk_get_from_provider(&clkspec);
+	of_node_put(np);
+
+	return clk;
+}
+
+/* Only the external SECONDARY MI2S/TDM port needs its LPAIF bit clock voted. */
+static bool q6apm_dai_needs_sec_bclk(int dai_id)
+{
+	return dai_id == SECONDARY_TDM_RX_0 || dai_id == SECONDARY_TDM_TX_0 ||
+	       dai_id == SECONDARY_MI2S_RX  || dai_id == SECONDARY_MI2S_TX;
+}
+
+static void q6apm_lpass_dai_bclk_enable(struct q6apm_lpass_dai_data *dai_data,
+					struct snd_soc_dai *dai)
+{
+	struct audioreach_module_config *cfg = &dai_data->module_config[dai->id];
+	unsigned long rate;
+	int rc;
+
+	if (!dai_data->sec_mi2s_bclk || !q6apm_dai_needs_sec_bclk(dai->id) ||
+	    dai_data->bclk_on[dai->id])
+		return;
+
+	/* 4 slots x 16 bit per frame unless a rate is forced. */
+	rate = sec_bclk_rate ? sec_bclk_rate : (unsigned long)cfg->sample_rate * 4 * 16;
+
+	rc = clk_set_rate(dai_data->sec_mi2s_bclk, rate);
+	if (rc)
+		dev_err(dai->dev, "sec bclk set_rate %lu failed (%d)\n", rate, rc);
+
+	rc = clk_prepare_enable(dai_data->sec_mi2s_bclk);
+	if (rc) {
+		dev_err(dai->dev, "sec bclk enable failed (%d)\n", rc);
+		return;
+	}
+	dai_data->bclk_on[dai->id] = true;
+	dev_info(dai->dev, "sec bclk enabled at %lu Hz for dai %d\n", rate, dai->id);
+}
+
+static void q6apm_lpass_dai_bclk_disable(struct q6apm_lpass_dai_data *dai_data,
+					 struct snd_soc_dai *dai)
+{
+	if (!dai_data->sec_mi2s_bclk || !dai_data->bclk_on[dai->id])
+		return;
+
+	clk_disable_unprepare(dai_data->sec_mi2s_bclk);
+	dai_data->bclk_on[dai->id] = false;
 }
 
 static void q6apm_lpass_dai_shutdown(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
@@ -198,6 +293,8 @@ static void q6apm_lpass_dai_shutdown(struct snd_pcm_substream *substream, struct
 		q6apm_graph_close(dai_data->graph[dai->id]);
 		dai_data->graph[dai->id] = NULL;
 	}
+
+	q6apm_lpass_dai_bclk_disable(dai_data, dai);
 }
 
 static int q6apm_lpass_dai_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -260,6 +357,9 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
 		goto err;
 	}
 
+	/* Bring the external SEC bit clock up before the EP starts consuming it. */
+	q6apm_lpass_dai_bclk_enable(dai_data, dai);
+
 	rc = q6apm_graph_prepare(dai_data->graph[dai->id]);
 	if (rc) {
 		dev_err(dai->dev, "Failed to prepare Graph %d\n", rc);
@@ -267,6 +367,7 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
 	}
 	return 0;
 err:
+	q6apm_lpass_dai_bclk_disable(dai_data, dai);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		q6apm_graph_close(dai_data->graph[dai->id]);
 		dai_data->graph[dai->id] = NULL;
@@ -425,6 +526,15 @@ static const struct snd_soc_dai_ops q6i2s_ops = {
 	.trigger	= q6apm_lpass_dai_trigger,
 };
 
+static const struct snd_soc_dai_ops q6tdm_ops = {
+	.prepare	= q6apm_lpass_dai_prepare,
+	.startup	= q6apm_lpass_dai_startup,
+	.shutdown	= q6apm_lpass_dai_shutdown,
+	.set_channel_map  = q6dma_set_channel_map,
+	.hw_params        = q6dma_hw_params,
+	.set_fmt	= q6i2s_set_fmt,
+};
+
 static const struct snd_soc_dai_ops q6hdmi_ops = {
 	.prepare	= q6apm_lpass_dai_prepare,
 	.startup	= q6apm_lpass_dai_startup,
@@ -520,10 +630,28 @@ static int q6apm_lpass_dai_dev_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int num_dais;
 	int ret;
+	int rc;
 
 	dai_data = devm_kzalloc(dev, sizeof(*dai_data), GFP_KERNEL);
 	if (!dai_data)
 		return -ENOMEM;
+
+	/*
+	 * The external SEC MI2S/TDM bit clock is a q6prm LPASS clock. The
+	 * bedais DT node has no "clocks" phandle for it, so grab it straight
+	 * from the q6prm-lpass-clocks provider by its cell values instead of
+	 * requiring a DT change. NULL (provider absent) -> helpers no-op.
+	 */
+	dai_data->sec_mi2s_bclk = q6apm_lpass_get_sec_bclk(dev);
+	if (IS_ERR(dai_data->sec_mi2s_bclk))
+		return dev_err_probe(dev, PTR_ERR(dai_data->sec_mi2s_bclk),
+				     "failed to get SEC MI2S/TDM bit clock\n");
+	if (dai_data->sec_mi2s_bclk) {
+		rc = devm_add_action_or_reset(dev, q6apm_lpass_put_clk,
+					      dai_data->sec_mi2s_bclk);
+		if (rc)
+			return rc;
+	}
 
 	dev_set_drvdata(dev, dai_data);
 	ret = of_q6apm_parse_dai_data(dev, dai_data);
@@ -536,9 +664,9 @@ static int q6apm_lpass_dai_dev_probe(struct platform_device *pdev)
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.q6i2s_ops = &q6i2s_ops;
+	cfg.q6tdm_ops = &q6tdm_ops;
 	cfg.q6dma_ops = &q6dma_ops;
 	cfg.q6hdmi_ops = &q6hdmi_ops;
-	cfg.q6tdm_ops = &q6tdm_ops;
 	dais = q6dsp_audio_ports_set_config(dev, &cfg, &num_dais);
 
 	return devm_snd_soc_register_component(dev, &q6apm_lpass_dai_component, dais, num_dais);

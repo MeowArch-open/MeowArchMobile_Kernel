@@ -33,6 +33,12 @@ struct ipa_qmi {
 	struct sockaddr_qrtr modem_sq;
 	struct work_struct init_driver_work;
 
+	/* Where the INDICATION_REGISTER request came from: the modem's QMI
+	 * *client*, which is who asked for the INIT_COMPLETE indication and is
+	 * a different port from the modem's server above.
+	 */
+	struct sockaddr_qrtr indication_sq;
+
 	/* Flags used in negotiating readiness */
 	bool initial_boot;
 	bool uc_ready;

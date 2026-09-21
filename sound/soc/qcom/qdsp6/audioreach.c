@@ -12,6 +12,31 @@
 #include "q6apm.h"
 #include "audioreach.h"
 
+#include <linux/moduleparam.h>
+
+/*
+ * TDM framing knobs, runtime-tunable so the SIA9187 sync mode / delay / slot
+ * layout can be swept on-device without a rebuild. Defaults match the vendor's
+ * TDM-LPAIF-RX-SECONDARY: 4 slots x 16 bit, short-sync slot mode, 1 bclk delay.
+ * Exposed under /sys/module/snd_q6apm/parameters/.
+ */
+static int tdm_nslots = 4;
+module_param(tdm_nslots, int, 0644);
+static int tdm_slot_width = 16;
+module_param(tdm_slot_width, int, 0644);
+static int tdm_sync_mode = TDM_SHORT_SYNC_SLOT_MODE;
+module_param(tdm_sync_mode, int, 0644);
+static int tdm_data_delay = TDM_DATA_DELAY_1_BCLK_CYCLE;
+module_param(tdm_data_delay, int, 0644);
+static int tdm_invert_sync = TDM_SYNC_NORMAL;
+module_param(tdm_invert_sync, int, 0644);
+static int tdm_slot_mask = -1; /* -1 = auto (1<<num_channels)-1 */
+module_param(tdm_slot_mask, int, 0644);
+static int tdm_sync_src = TDM_SYNC_SRC_INTERNAL; /* 1=LPASS masters bclk (vendor) */
+module_param(tdm_sync_src, int, 0644);
+static int tdm_lane_mask = 0x2; /* lane1=data1=amp DIN (gpio124); lane0=IV-sense in */
+module_param(tdm_lane_mask, int, 0644);
+
 /* SubGraph Config */
 struct apm_sub_graph_data {
 	struct apm_sub_graph_cfg sub_graph_cfg;
@@ -158,6 +183,18 @@ struct apm_audio_if_module_intf_cfg {
 } __packed;
 
 #define APM_AUDIO_IF_INTF_CFG_PSIZE ALIGN(sizeof(struct apm_audio_if_module_intf_cfg), 8)
+struct apm_tdm_module_intf_cfg {
+	struct apm_module_param_data param_data;
+	struct param_id_tdm_intf_cfg cfg;
+} __packed;
+
+#define APM_TDM_INTF_CFG_PSIZE ALIGN(sizeof(struct apm_tdm_module_intf_cfg), 8)
+
+struct apm_tdm_module_lane_cfg {
+	struct apm_module_param_data param_data;
+	struct param_id_tdm_lane_cfg cfg;
+} __packed;
+#define APM_TDM_LANE_CFG_PSIZE ALIGN(sizeof(struct apm_tdm_module_lane_cfg), 8)
 
 struct apm_module_hw_ep_mf_cfg {
 	struct apm_module_param_data param_data;
@@ -1141,6 +1178,111 @@ static int audioreach_audio_if_set_media_format(struct q6apm_graph *graph,
 	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
 }
 
+static int audioreach_tdm_set_media_format(struct q6apm_graph *graph,
+					   const struct audioreach_module *module,
+					   const struct audioreach_module_config *cfg)
+{
+	struct apm_module_frame_size_factor_cfg *fs_cfg;
+	struct apm_module_param_data *param_data;
+	struct apm_tdm_module_intf_cfg *intf_cfg;
+	struct apm_module_hw_ep_mf_cfg *hw_cfg;
+	int ic_sz = APM_TDM_INTF_CFG_PSIZE;
+	int ep_sz = APM_HW_EP_CFG_PSIZE;
+	int fs_sz = APM_FS_CFG_PSIZE;
+	int ln_sz = APM_TDM_LANE_CFG_PSIZE;
+	int size = ic_sz + ep_sz + fs_sz + ln_sz;
+	struct apm_tdm_module_lane_cfg *ln_cfg;
+	uint16_t nslots = tdm_nslots;
+	uint16_t slot_width = tdm_slot_width;
+	void *p;
+
+	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
+	if (IS_ERR(pkt))
+		return PTR_ERR(pkt);
+
+	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
+	intf_cfg = p;
+
+	param_data = &intf_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_TDM_INTF_CFG;
+	param_data->param_size = ic_sz - APM_MODULE_PARAM_DATA_SIZE;
+
+	intf_cfg->cfg.lpaif_type = module->hw_interface_type;
+	intf_cfg->cfg.intf_idx = module->hw_interface_idx;
+	intf_cfg->cfg.ctrl_data_out_enable = TDM_CTRL_DATA_OE_ENABLE;
+	/* Active slots: override, else least-significant num_channels slots */
+	if (tdm_slot_mask >= 0)
+		intf_cfg->cfg.slot_mask = tdm_slot_mask;
+	else
+		intf_cfg->cfg.slot_mask = (1 << cfg->num_channels) - 1;
+	intf_cfg->cfg.nslots_per_frame = nslots;
+	intf_cfg->cfg.slot_width = slot_width;
+	intf_cfg->cfg.sync_mode = tdm_sync_mode;
+	intf_cfg->cfg.ctrl_invert_sync_pulse = tdm_invert_sync;
+	intf_cfg->cfg.ctrl_sync_data_delay = tdm_data_delay;
+
+	/*
+	 * The machine driver only calls set_fmt for the MI2S port range, so a
+	 * TDM port arrives with cfg->fmt == 0 and no clock-provider bits. Default
+	 * to LPASS-as-master (INTERNAL) -- what the SIA9187 needs -- and let an
+	 * explicit fmt or the tdm_sync_src knob override it.
+	 */
+	intf_cfg->cfg.sync_src = tdm_sync_src;
+	switch (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BP_FP:
+		intf_cfg->cfg.sync_src = TDM_SYNC_SRC_INTERNAL;
+		break;
+	case SND_SOC_DAIFMT_BC_FC:
+		/* CPU is slave */
+		intf_cfg->cfg.sync_src = TDM_SYNC_SRC_EXTERNAL;
+		break;
+	default:
+		break;
+	}
+
+	p += ic_sz;
+	hw_cfg = p;
+	param_data = &hw_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_HW_EP_MF_CFG;
+	param_data->param_size = ep_sz - APM_MODULE_PARAM_DATA_SIZE;
+
+	hw_cfg->mf.sample_rate = cfg->sample_rate;
+	hw_cfg->mf.bit_width = cfg->bit_width;
+	hw_cfg->mf.num_channels = cfg->num_channels;
+	hw_cfg->mf.data_format = module->data_format;
+
+	p += ep_sz;
+	fs_cfg = p;
+	param_data = &fs_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_HW_EP_FRAME_SIZE_FACTOR;
+	param_data->param_size = fs_sz - APM_MODULE_PARAM_DATA_SIZE;
+	fs_cfg->frame_size_factor = 1;
+
+	p += fs_sz;
+	ln_cfg = p;
+	param_data = &ln_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_TDM_LANE_CFG;
+	param_data->param_size = ln_sz - APM_MODULE_PARAM_DATA_SIZE;
+	ln_cfg->cfg.lane_mask = tdm_lane_mask;
+	ln_cfg->cfg.reserved = 0;
+
+	pr_info("ar_tdm_dbg: iid=%#x lpaif=%u idx=%u src=%u lane=%#x nslots=%u width=%u mask=%#x sync=%u delay=%u inv=%u rate=%u bw=%u ch=%u\n",
+		module->instance_id, intf_cfg->cfg.lpaif_type, intf_cfg->cfg.intf_idx, intf_cfg->cfg.sync_src, ln_cfg->cfg.lane_mask,
+		intf_cfg->cfg.nslots_per_frame, intf_cfg->cfg.slot_width, intf_cfg->cfg.slot_mask,
+		intf_cfg->cfg.sync_mode, intf_cfg->cfg.ctrl_sync_data_delay, intf_cfg->cfg.ctrl_invert_sync_pulse,
+		hw_cfg->mf.sample_rate, hw_cfg->mf.bit_width, hw_cfg->mf.num_channels);
+
+	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
+}
+
 static int audioreach_logging_set_media_format(struct q6apm_graph *graph,
 					       const struct audioreach_module *module)
 {
@@ -1492,6 +1634,10 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
 	case MODULE_ID_I2S_SOURCE:
 	case MODULE_ID_I2S_SINK:
 		rc = audioreach_i2s_set_media_format(graph, module, cfg);
+		break;
+	case MODULE_ID_TDM_SOURCE:
+	case MODULE_ID_TDM_SINK:
+		rc = audioreach_tdm_set_media_format(graph, module, cfg);
 		break;
 	case MODULE_ID_WR_SHARED_MEM_EP:
 	case MODULE_ID_SH_MEM_PULL_MODE:

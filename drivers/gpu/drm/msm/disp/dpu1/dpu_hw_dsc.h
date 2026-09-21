@@ -64,6 +64,13 @@ struct dpu_hw_dsc {
 
 	/* ops */
 	struct dpu_hw_dsc_ops ops;
+
+	/* last DSC_MAIN_CONF written, so the log line is emitted only on change */
+	u32 last_main_conf;
+
+	/* last read-back wrapper registers, same reason */
+	u32 last_ctl_cfg;
+	u32 last_data_in_swap;
 };
 
 struct dpu_hw_dsc *dpu_hw_dsc_init(struct drm_device *dev,

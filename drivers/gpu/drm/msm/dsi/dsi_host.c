@@ -34,6 +34,68 @@
 
 #define DSI_RESET_TOGGLE_DELAY_MS 20
 
+/*
+ * Override the uncompressed bits-per-pixel used to derive the DSI byte clock on
+ * a DSC link. See the comment in dsi_byte_clk_get_rate(). 0 = stock upstream
+ * behaviour (take it from the MIPI DSI pixel format, which cannot express more
+ * than 8 bpc). Set to bits_per_component * 3 -- 30 for a 10 bpc panel -- to make
+ * it agree with dsi_adjust_pclk_for_compression().
+ */
+/*
+ * Slices carried in one DSI packet. mainline says outright that it only supports
+ * one -- dsi_update_dsc_timing() has
+ *
+ *	bytes_per_pkt = dsc->slice_chunk_size; / * * slice_per_pkt; * /
+ *	...
+ *	/ * Since the current driver only supports slice_per_pkt = 1,
+ *	  * pkt_per_line will be equal to slice per intf for now. * /
+ *	pkt_per_line = slice_per_intf;
+ *
+ * -- and zorn's panel asks for two: qcom,mdss-dsc-slice-per-pkt = <2>. The vendor
+ * driver computes (sde_dsc_populate_dsc_private_params)
+ *
+ *	bytes_per_pkt = bytes_in_slice * slice_per_pkt;   / * 720 * 2 = 1440 * /
+ *	pkt_per_line  = slice_per_intf / slice_per_pkt;   / * 2 / 2 = 1    * /
+ *
+ * so the panel expects one 1440-byte packet per line holding both slices, while
+ * mainline sends two 720-byte packets. Total bytes per line match, which is why
+ * every clock, PHY and DSC-parameter experiment came out identical -- the framing
+ * is what differs, and a mis-framed DSC stream corrupts per slice.
+ *
+ * drm_dsc_config has no field for this, so it is a parameter for now:
+ *
+ *	echo 2 > /sys/module/msm/parameters/dsi_dsc_slice_per_pkt
+ *	echo 1 > /sys/class/graphics/fb0/blank; sleep 2
+ *	echo 0 > /sys/class/graphics/fb0/blank
+ */
+static uint dsi_dsc_slice_per_pkt = 1;
+module_param(dsi_dsc_slice_per_pkt, uint, 0600);
+MODULE_PARM_DESC(dsi_dsc_slice_per_pkt,
+		 "DSC slices per DSI packet (1 = upstream behaviour)");
+
+static uint dsi_dsc_uncompressed_bpp;
+module_param(dsi_dsc_uncompressed_bpp, uint, 0600);
+MODULE_PARM_DESC(dsi_dsc_uncompressed_bpp,
+		 "Uncompressed bpp for DSC byte-clock math (0 = from pixel format)");
+
+/*
+ * Force DSC's convert_rgb instead of deriving it from the chroma format.
+ * 2 = derive (upstream: on for 4:4:4, off for native 4:2:x), 0/1 = force.
+ *
+ * convert_rgb=0 says the data reaching DSC is already YCbCr. That is what the
+ * vendor programs, but the vendor's DPU also never runs a CDM on the DSI path,
+ * so what actually arrives is RGB -- which only works out if the panel treats
+ * the three decoded channels as RGB again. With convert_rgb=0 on mainline the
+ * picture is structurally perfect but every colour with R != B collapses to
+ * white or black, i.e. the chroma channels are being read at the wrong scale.
+ * Forcing 1 makes DSC do the RGB -> YCoCg transform itself, which is the
+ * self-consistent story when the source really is RGB.
+ */
+static uint dsc_convert_rgb = 2;
+module_param(dsc_convert_rgb, uint, 0600);
+MODULE_PARM_DESC(dsc_convert_rgb,
+		 "DSC convert_rgb: 0/1 to force, 2 = derive from chroma format");
+
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
 
 static int dsi_get_version(const void __iomem *base, u32 *major, u32 *minor)
@@ -600,6 +662,49 @@ void dsi_link_clk_disable_v2(struct msm_dsi_host *msm_host)
  *  FIXME: Reconsider this if/when CMD mode handling is rewritten to use
  *  transfer time and data overhead as a starting point of the calculations.
  */
+/*
+ * Uncompressed bits per pixel of the source feeding DSC, which is what both the
+ * DSI timing and the byte clock have to be derived against. Upstream hardcodes
+ * 24 in dsi_adjust_pclk_for_compression(), which is only right at 8 bpc: the
+ * MIPI DSI pixel format enum stops at RGB888, so a 10 bpc panel has to report
+ * RGB888 and the pixel clock comes out 20% off.
+ *
+ * Upstream already disagrees with itself about this. dsi_timing_setup() picks
+ * bits_per_pclk for the DSI-side h, and its widebus video-mode branch uses
+ *
+ *	bits_per_pclk = dsc->bits_per_component * 3;
+ *
+ * -- the same quantity, correctly generalised. At 8 bpc both spellings give 24,
+ * which is why nobody has hit it.
+ *
+ * It does NOT depend on the chroma format, even though the vendor's
+ * msm_get_src_bpc() has a table that does (444 -> 3*bpc, 422 -> 2*bpc,
+ * 420 -> 1.5*bpc): that table is reached only from the DATABUS-WIDEN branch of
+ * sde_dsc_populate_dsc_private_params(), and 2*bpc is ruled out by measurement.
+ * On zorn (1440x3200, DSC 1.2 native 4:2:2, 10 bpc, porches 8/8/12 and 16/6/14):
+ *
+ *	3 * bpc = 30:  hdisplay 1440*8/30 = 384, htotal 412
+ *		       pclk 412 * 3236 * 120 = 160.0 MHz, byte 160.0*30/32 = 150.0
+ *		       measured on Arch:  159,987,617 / 149,988,391
+ *		       measured on Android: 160,000,000 / 150,000,000
+ *	2 * bpc = 20:  hdisplay 576, htotal 604, pclk 234.6 MHz, byte 146.6 MHz
+ *
+ * Both clocks land within 0.01% of Android's with 3*bpc and neither does with
+ * 2*bpc. The 2*bpc error had the DPU 46% fast into the DSI; it hid because
+ * byte_clk = pclk * bpp / 32 carries the error in bpp too, so the two partly
+ * cancel and byte_clk looked only 2.3% low.
+ *
+ * This is a different quantity from dsi_timing_setup()'s bits_per_pclk, which in
+ * widebus command mode is 48 and gives the DSI-side h of 1440*8/48 = 240. That
+ * one is how many bytes the bus moves per pclk; this one is how much source
+ * pixel each pclk stands for. Both are in play at once and they do not have to
+ * agree -- 240 pclk of transfer window inside a 412-pclk line is simply slack.
+ */
+static int dsi_dsc_src_bpp(const struct drm_dsc_config *dsc)
+{
+	return dsc->bits_per_component * 3;
+}
+
 static unsigned long
 dsi_adjust_pclk_for_compression(const struct drm_display_mode *mode,
 				const struct drm_dsc_config *dsc,
@@ -618,7 +723,7 @@ dsi_adjust_pclk_for_compression(const struct drm_display_mode *mode,
 		hdisplay /= 2;
 
 	new_hdisplay = DIV_ROUND_UP(hdisplay * drm_dsc_get_bpp_int(dsc),
-				    dsc->bits_per_component * 3);
+				    dsi_dsc_src_bpp(dsc));
 
 	if (is_bonded_dsi)
 		new_hdisplay *= 2;
@@ -655,9 +760,34 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	u8 lanes = msm_host->lanes;
+	/*
+	 * With DSC, dsi_adjust_pclk_for_compression() has already scaled the pixel
+	 * clock down by compressed_bpp / (bits_per_component * 3), so the byte clock
+	 * has to be scaled back up by that same uncompressed depth.
+	 * mipi_dsi_pixel_format_to_bpp() cannot supply it: the MIPI DSI format enum
+	 * stops at RGB888, so a 10 bpc panel has to report RGB888 and yields 24 where
+	 * the adjustment used 30 -- a byte clock 20% low. On zorn (o11 42 02 0a, DSC
+	 * 1.2, 8 bpp, 10 bpc) that is 960 Mbps/lane against the 1.2 Gbps/lane the
+	 * panel's own device tree asks for. 8 bpc DSC panels are unaffected, which is
+	 * why upstream has not hit this.
+	 *
+	 * Left as a module parameter because on zorn neither rate has produced a
+	 * clean picture yet: 960 Mbps gives an image with periodic corruption bands,
+	 * 1.2 Gbps gives no image at all. Being able to sweep it -- including values
+	 * the format enum could never express -- costs one reboot per try instead of
+	 * a rebuild, via /etc/modprobe.d:
+	 *
+	 *	options msm dsi_dsc_uncompressed_bpp=30
+	 *
+	 * 0 keeps stock upstream behaviour.
+	 */
 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
 	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
 	unsigned long pclk_bpp;
+
+	if (msm_host->dsc)
+		bpp = dsi_dsc_uncompressed_bpp ? dsi_dsc_uncompressed_bpp
+					       : dsi_dsc_src_bpp(msm_host->dsc);
 
 	if (lanes == 0) {
 		pr_err("%s: forcing mdss_dsi lanes to 1\n", __func__);
@@ -938,6 +1068,20 @@ static void dsi_ctrl_enable(struct msm_dsi_host *msm_host,
 		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, BIT(0));
 }
 
+/*
+ * Slices per packet actually in force: the requested value if the slices divide
+ * evenly into the line, otherwise 1. The vendor driver clamps the same way.
+ */
+static u32 dsi_dsc_slice_per_pkt_clamped(const struct drm_dsc_config *dsc)
+{
+	u32 n = dsi_dsc_slice_per_pkt;
+
+	if (!n || n > dsc->slice_count || dsc->slice_count % n)
+		return 1;
+
+	return n;
+}
+
 static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mode)
 {
 	struct drm_dsc_config *dsc = msm_host->dsc;
@@ -946,17 +1090,21 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 	u32 pkt_per_line;
 	u32 eol_byte_num;
 	u32 bytes_per_pkt;
+	u32 slice_per_pkt;
 
 	/* first calculate dsc parameters and then program
 	 * compress mode registers
 	 */
 	slice_per_intf = dsc->slice_count;
 
+	slice_per_pkt = dsi_dsc_slice_per_pkt_clamped(dsc);
+
 	total_bytes_per_intf = dsc->slice_chunk_size * slice_per_intf;
-	bytes_per_pkt = dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt;
+	bytes_per_pkt = dsc->slice_chunk_size * slice_per_pkt;
 
 	eol_byte_num = total_bytes_per_intf % 3;
-	pkt_per_line = slice_per_intf / msm_host->dsc_slice_per_pkt;
+
+	pkt_per_line = slice_per_intf / slice_per_pkt;
 
 	if (is_cmd_mode) /* packet data type */
 		reg = DSI_COMMAND_COMPRESSION_MODE_CTRL_STREAM0_DATATYPE(MIPI_DSI_DCS_LONG_WRITE);
@@ -983,10 +1131,34 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 		reg_ctrl |= reg;
 
 		reg_ctrl2 &= ~DSI_COMMAND_COMPRESSION_MODE_CTRL2_STREAM0_SLICE_WIDTH__MASK;
+		/*
+		 * One slice, not one packet: the vendor driver writes bytes_in_slice
+		 * here as well (reg_ctrl2 |= bytes_in_slice << offset). Only the
+		 * packet count and the word count scale with slice_per_pkt.
+		 */
 		reg_ctrl2 |= DSI_COMMAND_COMPRESSION_MODE_CTRL2_STREAM0_SLICE_WIDTH(dsc->slice_chunk_size);
 
 		dsi_write(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL, reg_ctrl);
 		dsi_write(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL2, reg_ctrl2);
+
+		/*
+		 * Read back instead of trusting the computation. STREAM0_PKT_PER_LINE
+		 * (bits 7:6) is the one field where both working references -- the
+		 * bootloader and the vendor kernel -- ask for 0, meaning one packet
+		 * per line with both slices inside it; a wrong value here does not
+		 * show up in the timing. Note the register offsets in this file are
+		 * 4 less than the vendor's, because ctrl_base carries io_offset:
+		 * this is the vendor's DSI_COMMAND_COMPRESSION_MODE_CTRL at +0x2a8.
+		 * Print from the config path rather than reading the register from
+		 * userspace, which hard-resets the SoC once the panel goes idle.
+		 */
+		reg_ctrl = dsi_read(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL);
+		reg_ctrl2 = dsi_read(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL2);
+		pr_info("msm_dsi: CMPR_MODE_CTRL(hw +0x2a8) %#010x pkt_per_line_field %u eol %u | CTRL2(hw +0x2ac) %#010x slice_width %u | slice_cnt %u chunk %u slice_per_pkt %u pkt_per_line %u bytes_per_pkt %u\n",
+			reg_ctrl, (reg_ctrl >> 6) & 0x3, eol_byte_num,
+			reg_ctrl2, reg_ctrl2 & 0xffff,
+			slice_per_intf, dsc->slice_chunk_size, slice_per_pkt,
+			pkt_per_line, bytes_per_pkt);
 	} else {
 		reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_WC(bytes_per_pkt);
 		dsi_write(msm_host, REG_DSI_VIDEO_COMPRESSION_MODE_CTRL, reg);
@@ -1111,9 +1283,15 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 			wc = hdisplay * mipi_dsi_pixel_format_to_bpp(msm_host->format) / 8 + 1;
 		else
 			/*
-			 * When DSC is enabled, WC = slice_chunk_size * slice_per_pkt + 1.
+			 * WC = slice_chunk_size * slice_per_pkt + 1. Upstream hardcodes
+			 * slice_per_pkt = 1 here and in dsi_update_dsc_timing(); the
+			 * dsi_dsc_slice_per_pkt parameter drives both, because getting
+			 * only one of them right produces a packet whose declared length
+			 * and whose framing disagree -- which corrupts the whole screen
+			 * rather than just the detailed parts of it.
 			 */
-			wc = msm_host->dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt + 1;
+			wc = msm_host->dsc->slice_chunk_size *
+			     dsi_dsc_slice_per_pkt_clamped(msm_host->dsc) + 1;
 
 		dsi_write(msm_host, REG_DSI_CMD_MDP_STREAM0_CTRL,
 			DSI_CMD_MDP_STREAM0_CTRL_WORD_COUNT(wc) |
@@ -1125,6 +1303,13 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 		dsi_write(msm_host, REG_DSI_CMD_MDP_STREAM0_TOTAL,
 			DSI_CMD_MDP_STREAM0_TOTAL_H_TOTAL(hdisplay) |
 			DSI_CMD_MDP_STREAM0_TOTAL_V_TOTAL(mode->vdisplay));
+
+		/* the vendor's DSI_COMMAND_MODE_MDP_STREAM0_CTRL at +0x58 */
+		if (msm_host->dsc)
+			pr_info("msm_dsi: MDP_STREAM0_CTRL(hw +0x58) %#010x word_count %u | TOTAL(hw +0x5c) %#010x h %u v %u\n",
+				dsi_read(msm_host, REG_DSI_CMD_MDP_STREAM0_CTRL), wc,
+				dsi_read(msm_host, REG_DSI_CMD_MDP_STREAM0_TOTAL),
+				hdisplay, mode->vdisplay);
 	}
 }
 
@@ -1875,6 +2060,68 @@ static int dsi_host_parse_lane_data(struct msm_dsi_host *msm_host,
 	return -EINVAL;
 }
 
+/*
+ * initial_xmit_delay override, 0 to keep whatever the rate-control table gives.
+ *
+ * The tables derive it from chroma format and bpp, but a panel's own tuning can
+ * differ. The vendor stack hardcodes 256 for this display's panel ID -- see
+ * sde_dsc_helper.c, which patches rc_param_lut->initial_xmit_delay for
+ * O11_PANEL_PA and N11U_PANEL_PA -- where the standard 4:2:2 table says 341.
+ * The difference lands in DSC_HRD_DELAYS and in everything
+ * drm_dsc_compute_rc_parameters() derives from it.
+ */
+static uint dsc_xmit_delay;
+module_param(dsc_xmit_delay, uint, 0600);
+MODULE_PARM_DESC(dsc_xmit_delay,
+		 "override DSC initial_xmit_delay; 0 uses the rate-control table's value");
+
+/*
+ * initial_dec_delay override, 0 to keep the computed value.
+ *
+ * Normally hrd_delay - initial_xmit_delay, but the vendor stack overrides it for
+ * this display's panel ID as well (sde_dsc_helper.c sets 478 for O11_PANEL_PA and
+ * N11U_PANEL_PA). Together with dsc_xmit_delay these are the two halves of
+ * DSC_HRD_DELAYS, so both usually have to be set or neither.
+ */
+static uint dsc_dec_delay;
+module_param(dsc_dec_delay, uint, 0600);
+MODULE_PARM_DESC(dsc_dec_delay,
+		 "override DSC initial_dec_delay; 0 uses the computed value");
+
+/*
+ * DSC 1.2 takes first_line_bpg_offset from the slice height, not from the
+ * rate-control table -- the table entry is the DSC 1.1 legacy constant. For a
+ * 4:2:2 stream the table says 15 while a 20-line slice wants 13.
+ *
+ * Transcribed from the vendor stack's _get_dsc_v1_2_bpg_offset().
+ */
+static u8 dsi_dsc_v1_2_bpg_offset(const struct drm_dsc_config *dsc)
+{
+	u8 bpp = dsc->bits_per_pixel >> 4;
+	u8 uncompressed_bpg_rate;
+	u8 bpg_offset;
+
+	if (dsc->slice_height < 8)
+		bpg_offset = 2 * (dsc->slice_height - 1);
+	else if (dsc->slice_height < 20)
+		bpg_offset = 12;
+	else if (dsc->slice_height <= 30)
+		bpg_offset = 13;
+	else if (dsc->slice_height < 42)
+		bpg_offset = 14;
+	else
+		bpg_offset = 15;
+
+	if (dsc->native_422)
+		uncompressed_bpg_rate = 3 * bpp * 4;
+	else if (dsc->native_420)
+		uncompressed_bpg_rate = 3 * bpp;
+	else
+		uncompressed_bpg_rate = (3 * bpp + 2) * 3;
+
+	return min_t(u8, bpg_offset, uncompressed_bpg_rate - 3 * bpp);
+}
+
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc)
 {
 	int ret;
@@ -1902,14 +2149,41 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	}
 
 	dsc->simple_422 = 0;
-	dsc->convert_rgb = 1;
+	/*
+	 * convert_rgb asks DSC to do the RGB -> YCoCg transform itself, which only
+	 * makes sense for a 4:4:4 RGB source. A native 4:2:2 or 4:2:0 source
+	 * arrives as YCbCr with the chroma already subsampled, so upstream's
+	 * derivation makes the two mutually exclusive -- and that is what the
+	 * vendor programs too. But the vendor's DPU never runs a CDM on the DSI
+	 * path, so nothing on either stack actually converts RGB to YCbCr before
+	 * DSC; see the parameter's comment. Overridable because the measured
+	 * failure (chroma at the wrong scale, structure perfect) is exactly what a
+	 * missing forward transform looks like.
+	 */
+	if (dsc_convert_rgb <= 1)
+		dsc->convert_rgb = dsc_convert_rgb;
+	else
+		dsc->convert_rgb = !dsc->native_422 && !dsc->native_420;
 	dsc->vbr_enable = 0;
 
 	drm_dsc_set_const_params(dsc);
 	drm_dsc_set_rc_buf_thresh(dsc);
 
-	/* DPU supports only pre-SCR panels */
-	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
+	/*
+	 * Pick the rate-control table that matches the chroma format. The pre-SCR
+	 * set is DSC 1.1 legacy and only describes 4:4:4; a native 4:2:2 stream has
+	 * its own initial_xmit_delay, initial_offset and rc_range_params, and
+	 * feeding it the 4:4:4 numbers leaves the decoder's rate control out of
+	 * step with the encoder -- the picture breaks up even though every field
+	 * the driver sets explicitly looks correct.
+	 *
+	 * DPU supports only pre-SCR panels, which is why 4:4:4 uses that table
+	 * rather than DRM_DSC_1_2_444.
+	 */
+	if (dsc->native_422)
+		ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_2_422);
+	else
+		ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
 	if (ret) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
 		return ret;
@@ -1918,7 +2192,26 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
 	dsc->line_buf_depth = dsc->bits_per_component + 1;
 
-	return drm_dsc_compute_rc_parameters(dsc);
+	/*
+	 * Both of these have to land after setup_rc_params, which sets them from
+	 * the table, and before compute_rc_parameters, which derives hrd_delay,
+	 * the scale intervals and the bpg offsets from them.
+	 */
+	if (dsc->dsc_version_minor == 0x2)
+		dsc->first_line_bpg_offset = dsi_dsc_v1_2_bpg_offset(dsc);
+
+	if (dsc_xmit_delay)
+		dsc->initial_xmit_delay = dsc_xmit_delay;
+
+	ret = drm_dsc_compute_rc_parameters(dsc);
+	if (ret)
+		return ret;
+
+	/* after compute_rc_parameters, which is what derives initial_dec_delay */
+	if (dsc_dec_delay)
+		dsc->initial_dec_delay = dsc_dec_delay;
+
+	return 0;
 }
 
 static int dsi_host_parse_dt(struct msm_dsi_host *msm_host)

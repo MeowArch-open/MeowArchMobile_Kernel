@@ -182,19 +182,19 @@ static const struct dpu_dspp_cfg sm8650_dspp[] = {
 	{
 		.name = "dspp_0", .id = DSPP_0,
 		.base = 0x54000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8650_dspp_sblk_0,
 	}, {
 		.name = "dspp_1", .id = DSPP_1,
 		.base = 0x56000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8650_dspp_sblk_1,
 	}, {
 		.name = "dspp_2", .id = DSPP_2,
 		.base = 0x58000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8650_dspp_sblk_2,
 	}, {
 		.name = "dspp_3", .id = DSPP_3,
 		.base = 0x5a000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8650_dspp_sblk_3,
 	},
 };
 

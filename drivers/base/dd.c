@@ -669,7 +669,7 @@ static int really_probe(struct device *dev, const struct device_driver *drv)
 	if (link_ret == -EPROBE_DEFER)
 		return link_ret;
 
-	dev_dbg(dev, "bus: '%s': %s: probing driver %s with device\n",
+	dev_info(dev, "bus: '%s': %s: probing driver %s with device\n",
 		drv->bus->name, __func__, drv->name);
 	if (!list_empty(&dev->devres_head)) {
 		dev_crit(dev, "Resources present before probing\n");

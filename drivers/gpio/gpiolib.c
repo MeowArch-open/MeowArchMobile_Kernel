@@ -1313,10 +1313,17 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 		 * and return -EINVAL. Also: there's no need to take the SRCU
 		 * lock here.
 		 */
-		if (gc->get_direction && gpiochip_line_is_valid(gc, desc_index))
+		if (gc->get_direction && gpiochip_line_is_valid(gc, desc_index)) {
+			/* TLMMDBG: only for big chips (TLMM has 211 lines) so the
+			 * log is not swamped by the small PMIC gpiochips. The last
+			 * index printed without a following one is the line whose
+			 * register read never returned. */
+			if (gc->ngpio > 100)
+				pr_info("GPIODBG %s: reading dir of line %u\n",
+					gc->label, desc_index);
 			assign_bit(GPIOD_FLAG_IS_OUT, &desc->flags,
 				   !gc->get_direction(gc, desc_index));
-		else
+		} else
 			assign_bit(GPIOD_FLAG_IS_OUT,
 				   &desc->flags, !gc->direction_input);
 	}

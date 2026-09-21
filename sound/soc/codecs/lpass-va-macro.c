@@ -613,6 +613,17 @@ static int va_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+/*
+ * The DMIC clock divider, overridable at runtime. The rate comes from
+ * qcom,dmic-sample-rate, which means one reboot per value to try, and a PDM
+ * microphone that stays silent may simply not be clocked fast enough to leave
+ * standby. This is read where the divider is programmed, so a write here takes
+ * effect on the next stream: 0 = DT, otherwise 1..6 selects DIV_2, 3, 4, 6, 8, 16.
+ */
+static int va_dmic_div;
+module_param_named(dmic_div, va_dmic_div, int, 0644);
+MODULE_PARM_DESC(dmic_div, "override the DMIC clock divider (0=DT, 1..6 = /2 /3 /4 /6 /8 /16)");
+
 static int va_dmic_clk_enable(struct snd_soc_component *component,
 			      u32 dmic, bool enable)
 {
@@ -660,6 +671,8 @@ static int va_dmic_clk_enable(struct snd_soc_component *component,
 
 	if (enable) {
 		clk_div = va->dmic_clk_div;
+		if (va_dmic_div >= 1 && va_dmic_div <= 6)
+			clk_div = va_dmic_div - 1;
 		(*dmic_clk_cnt)++;
 		if (*dmic_clk_cnt == 1) {
 			snd_soc_component_update_bits(component,
