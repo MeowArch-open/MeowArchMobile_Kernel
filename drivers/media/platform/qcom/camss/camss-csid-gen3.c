@@ -273,11 +273,17 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	buf_done_val = readl(csid->base + CSID_BUF_DONE_IRQ_STATUS);
 	writel(buf_done_val, csid->base + CSID_BUF_DONE_IRQ_CLEAR);
 
+	dev_info_ratelimited(csid->camss->dev,
+		"CSIDDBG: rx_irq=0x%08x buf_done=0x%08x en_vc=0x%x\n",
+		val, buf_done_val, csid->phy.en_vc);
+
 	/* Read and clear IRQ status for each enabled RDI channel */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
 		if (csid->phy.en_vc & BIT(i)) {
 			val = readl(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
 			writel(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+			dev_info_ratelimited(csid->camss->dev,
+				"CSIDDBG: rdi%d irq=0x%08x\n", i, val);
 
 			if (val & RUP_DONE_IRQ_STATUS)
 				/* clear the reg update bit */
