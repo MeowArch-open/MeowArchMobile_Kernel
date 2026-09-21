@@ -1594,13 +1594,40 @@ static void ipa_endpoint_status_parse(struct ipa_endpoint *endpoint,
 	}
 }
 
+/* zorn: how many RX completions we have logged, and how many TX ones we saw */
+static u32 ipa_rx_logged;
+static u32 ipa_tx_logged;
+
 void ipa_endpoint_trans_complete(struct ipa_endpoint *endpoint,
 				 struct gsi_trans *trans)
 {
 	struct page *page;
 
-	if (endpoint->toward_ipa)
+	if (endpoint->toward_ipa) {
+		ipa_tx_logged++;
 		return;
+	}
+
+	/* zorn (SM8650): the modem delivers nothing to the AP -- rmnet_ipa0's RX
+	 * counters stay at zero while GSI keeps raising interrupts.  Those
+	 * counters are only touched once a transaction gets this far, and the two
+	 * ways out of here that leave no trace at all are a cancelled
+	 * transaction and a NULL endpoint->netdev, so log what actually arrives.
+	 */
+	if (ipa_rx_logged < 32) {
+		ipa_rx_logged++;
+		pr_info("ipa rx: #%u ep %u len %u cancelled %d netdev %s (tx completions %u)\n",
+			ipa_rx_logged, endpoint->endpoint_id, trans->len,
+			trans->cancelled,
+			endpoint->netdev ? netdev_name(endpoint->netdev)
+					 : "(none)",
+			ipa_tx_logged);
+		if (!trans->cancelled && trans->len && trans->data)
+			print_hex_dump(KERN_INFO, "ipa rx: ",
+				       DUMP_PREFIX_OFFSET, 16, 1,
+				       page_address(trans->data) + NET_SKB_PAD,
+				       min_t(u32, trans->len, 64), false);
+	}
 
 	if (trans->cancelled)
 		goto done;

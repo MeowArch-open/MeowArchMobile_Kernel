@@ -242,6 +242,16 @@ u32 dpu_encoder_get_drm_fmt(struct dpu_encoder_phys *phys_enc)
 	if (drm_mode_is_420_only(info, mode))
 		return DRM_FORMAT_YUV420;
 
+	/*
+	 * A native 4:2:2 DSC stream needs CDM to hand DSC YCbCr with the chroma
+	 * horizontally subsampled. NV16 is the 8-bit 4:2:2 entry in the format
+	 * table (CHROMA_H2V1); only its chroma_sample and bit depth matter here,
+	 * because CDM feeds DSC directly instead of writing to memory, so the
+	 * plane layout the format also describes never comes into play.
+	 */
+	if (dpu_enc->dsc && dpu_enc->dsc->native_422)
+		return DRM_FORMAT_NV16;
+
 	return DRM_FORMAT_RGB888;
 }
 
@@ -653,6 +663,79 @@ struct drm_dsc_config *dpu_encoder_get_dsc_config(struct drm_encoder *drm_enc)
 	return NULL;
 }
 
+/*
+ * Whether a native 4:2:2 DSC stream is routed through CDM.
+ *
+ * Off, because the vendor does not do it. On a running Android this SoC reads
+ * CDM_CSC_10_OPMODE = 0x2 (SRC_FMT_YUV with the enable bit clear) and a
+ * downsample block that is all zero, while its DSC runs with native_422 = 1. So
+ * the DSC block does the RGB -> YCbCr conversion and the chroma subsample
+ * itself, and convert_rgb only governs the 4:4:4 RGB -> YCoCg path.
+ *
+ * The CDM path is kept because mainline genuinely never wired CDM to DSI and
+ * another panel may want it -- but turning it on here made this one stop
+ * scanning out altogether, wait_for_idle timing out on every frame.
+ */
+static bool dsc_use_cdm;
+module_param(dsc_use_cdm, bool, 0600);
+MODULE_PARM_DESC(dsc_use_cdm,
+		 "route a native 4:2:2 DSC stream through CDM; off matches what the vendor does");
+
+/*
+ * CDM's colour-space matrix. The block always has its CSC enabled in
+ * dpu_hw_cdm_enable(), so the only way through it without a colour transform is
+ * to hand it an identity matrix: coefficients are S15.16 with 1.0 at 0x200,
+ * biases zero, both clamps full range 0..0x3ff (the 601 limited matrix instead
+ * post-biases by 64/512/512 and clamps to 64..940).
+ *
+ * Identity is the default because CDM is wanted here for its packer, not for a
+ * colour conversion. The vendor sends the panel plain RGB through DSC, so
+ * converting to YCbCr on the way in would be a transform the panel never undoes.
+ * What is missing without CDM is only the interleave.
+ */
+static const struct dpu_csc_cfg dpu_csc10_identity = {
+	{
+		TO_S15D16(0x0200), TO_S15D16(0x0000), TO_S15D16(0x0000),
+		TO_S15D16(0x0000), TO_S15D16(0x0200), TO_S15D16(0x0000),
+		TO_S15D16(0x0000), TO_S15D16(0x0000), TO_S15D16(0x0200)
+	},
+	{ 0x00, 0x00, 0x00 },
+	{ 0x0000, 0x0000, 0x0000 },
+	{ 0x000, 0x3ff, 0x000, 0x3ff, 0x000, 0x3ff },
+	{ 0x000, 0x3ff, 0x000, 0x3ff, 0x000, 0x3ff },
+};
+
+static bool dsc_cdm_csc_601;
+module_param(dsc_cdm_csc_601, bool, 0600);
+MODULE_PARM_DESC(dsc_cdm_csc_601,
+		 "use the RGB->YCbCr 601 limited matrix in CDM instead of identity");
+
+/*
+ * A DSI panel needs CDM only when its DSC stream is native 4:2:2. convert_rgb is
+ * off in that mode, so DSC does no colour transform of its own and the pixels
+ * have to arrive already YCbCr with the chroma horizontally subsampled -- CDM,
+ * between the layer mixer and DSC, is what does that.
+ *
+ * This reads the config instead of using dpu_enc->dsc because the earliest
+ * caller is atomic_mode_set, and dpu_enc->dsc is not filled in until
+ * atomic_enable, one step later.
+ */
+static bool dpu_encoder_dsi_needs_cdm(struct drm_encoder *drm_enc)
+{
+	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
+	struct drm_dsc_config *dsc;
+
+	if (!dsc_use_cdm)
+		return false;
+
+	if (dpu_enc->disp_info.intf_type != INTF_DSI)
+		return false;
+
+	dsc = dpu_encoder_get_dsc_config(drm_enc);
+
+	return dsc && dsc->native_422;
+}
+
 void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 				 struct msm_display_topology *topology,
 				 struct drm_atomic_commit *state,
@@ -700,9 +783,10 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 		return;
 
 	/*
-	 * Use CDM only for writeback or DP at the moment as other interfaces cannot handle it.
-	 * If writeback itself cannot handle cdm for some reason it will fail in its atomic_check()
-	 * earlier.
+	 * CDM is used for writeback, for DP 4:2:0, and for a DSI panel driven as
+	 * DSC native 4:2:2. Any other interface cannot handle it. If writeback
+	 * itself cannot handle cdm for some reason it will fail in its
+	 * atomic_check() earlier.
 	 */
 	if (disp_info->intf_type == INTF_WB && conn_state->writeback_job) {
 		fb = conn_state->writeback_job->fb;
@@ -711,6 +795,9 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 			topology->num_cdm++;
 	} else if (disp_info->intf_type == INTF_DP) {
 		if (drm_mode_is_420_only(&connector->display_info, adj_mode))
+			topology->num_cdm++;
+	} else if (disp_info->intf_type == INTF_DSI) {
+		if (dpu_encoder_dsi_needs_cdm(drm_enc))
 			topology->num_cdm++;
 	}
 }
@@ -1230,7 +1317,8 @@ static void dpu_encoder_virt_atomic_mode_set(struct drm_encoder *drm_enc,
 	dpu_enc->dsc_mask = dsc_mask;
 
 	if ((dpu_enc->disp_info.intf_type == INTF_WB && conn_state->writeback_job) ||
-	    dpu_enc->disp_info.intf_type == INTF_DP) {
+	    dpu_enc->disp_info.intf_type == INTF_DP ||
+	    dpu_encoder_dsi_needs_cdm(drm_enc)) {
 		struct dpu_hw_blk *hw_cdm = NULL;
 
 		dpu_rm_get_assigned_resources(&dpu_kms->rm, global_state,
@@ -1962,6 +2050,33 @@ int dpu_encoder_vsync_time(struct drm_encoder *drm_enc, ktime_t *wakeup_time)
 	return 0;
 }
 
+/*
+ * DSC "initial lines" is a DPU-side value that is NOT carried in the PPS: it is
+ * how many lines the DSC encoder buffers before it starts emitting. Get it wrong
+ * and the rate buffer misbehaves once per slice row -- invisible on flat content,
+ * which never uses its rate budget, and visible as periodic bands on detailed
+ * content. That is exactly what zorn's panel does.
+ *
+ * Note that dpu_hw_dsc.c (the DSC 1.1 block) adds one line in command mode:
+ *
+ *	if (is_cmd_mode)
+ *		initial_lines += 1;
+ *
+ * and dpu_hw_dsc_1_2.c -- the block SM8650 actually uses -- does not. On a
+ * command mode DSC 1.2 panel that difference is a real candidate, so allow the
+ * value to be forced:
+ *
+ *	echo 3 > /sys/module/msm/parameters/dsc_initial_lines
+ *	echo 1 > /sys/class/graphics/fb0/blank; sleep 2
+ *	echo 0 > /sys/class/graphics/fb0/blank
+ *
+ * 0 = use the computed value.
+ */
+static uint dsc_initial_lines;
+module_param(dsc_initial_lines, uint, 0600);
+MODULE_PARM_DESC(dsc_initial_lines,
+		 "Force DSC initial lines (0 = computed)");
+
 static u32
 dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
 				  u32 enc_ip_width)
@@ -2053,6 +2168,12 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 
 	enc_ip_w = intf_ip_w / num_dsc;
 	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
+	if (dsc_initial_lines)
+		initial_lines = dsc_initial_lines;
+
+	DPU_DEBUG_ENC(dpu_enc,
+		      "dsc: %d engines, mode 0x%x, enc_ip_w %d, initial_lines %d\n",
+		      num_dsc, dsc_common_mode, enc_ip_w, initial_lines);
 
 	for (i = 0; i < num_dsc; i++)
 		dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i], hw_pp[i],
@@ -2336,6 +2457,10 @@ void dpu_encoder_helper_phys_cleanup(struct dpu_encoder_phys *phys_enc)
 	if (phys_enc->hw_pp && phys_enc->hw_pp->merge_3d)
 		intf_cfg.merge_3d = phys_enc->hw_pp->merge_3d->idx;
 
+	/* clear CTL_CDM_ACTIVE too, for the same reason the cmd path sets it */
+	if (phys_enc->hw_cdm)
+		intf_cfg.cdm = phys_enc->hw_cdm->idx;
+
 	if (ctl->ops.reset_intf_cfg)
 		ctl->ops.reset_intf_cfg(ctl, &intf_cfg);
 
@@ -2419,6 +2544,7 @@ void dpu_encoder_helper_phys_setup_cdm(struct dpu_encoder_phys *phys_enc,
 	struct dpu_hw_cdm *hw_cdm;
 	struct dpu_hw_cdm_cfg *cdm_cfg;
 	struct dpu_hw_pingpong *hw_pp;
+	struct drm_dsc_config *dsc;
 	int ret;
 
 	if (!phys_enc)
@@ -2446,9 +2572,22 @@ void dpu_encoder_helper_phys_setup_cdm(struct dpu_encoder_phys *phys_enc,
 	cdm_cfg->output_height = phys_enc->cached_mode.vdisplay;
 	cdm_cfg->output_fmt = dpu_fmt;
 	cdm_cfg->output_type = output_type;
-	cdm_cfg->output_bit_depth = MSM_FORMAT_IS_DX(dpu_fmt) ?
-			CDM_CDWN_OUTPUT_10BIT : CDM_CDWN_OUTPUT_8BIT;
-	cdm_cfg->csc_cfg = &dpu_csc10_rgb2yuv_601l;
+	/*
+	 * The DRM format only carries the depth for formats that have a memory
+	 * layout, and the 4:2:2 one picked for the DSI path (NV16) is 8-bit. CDM
+	 * here feeds DSC directly, so the depth that matters is DSC's
+	 * bits_per_component -- 10 on this panel. Programming 8 while DSC reads 10
+	 * shifts every component.
+	 */
+	dsc = dpu_encoder_get_dsc_config(phys_enc->parent);
+	if (dsc && dsc->native_422)
+		cdm_cfg->output_bit_depth = dsc->bits_per_component > 8 ?
+				CDM_CDWN_OUTPUT_10BIT : CDM_CDWN_OUTPUT_8BIT;
+	else
+		cdm_cfg->output_bit_depth = MSM_FORMAT_IS_DX(dpu_fmt) ?
+				CDM_CDWN_OUTPUT_10BIT : CDM_CDWN_OUTPUT_8BIT;
+	cdm_cfg->csc_cfg = dsc_cdm_csc_601 ? &dpu_csc10_rgb2yuv_601l
+					   : &dpu_csc10_identity;
 
 	/* enable 10 bit logic */
 	switch (cdm_cfg->output_fmt->chroma_sample) {

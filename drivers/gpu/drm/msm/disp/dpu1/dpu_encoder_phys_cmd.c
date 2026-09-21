@@ -66,6 +66,14 @@ static void _dpu_encoder_phys_cmd_update_intf_cfg(
 	intf_cfg.stream_sel = cmd_enc->stream_sel;
 	intf_cfg.mode_3d = dpu_encoder_helper_get_3d_blend_mode(phys_enc);
 	intf_cfg.dsc = dpu_encoder_helper_get_dsc(phys_enc);
+	/*
+	 * CTL_CDM_ACTIVE has to name the CDM or the CTL does not consider it part
+	 * of this path: the block is configured and flushed, but the CTL start
+	 * interrupt never arrives and every frame times out. Upstream only ever
+	 * filled this in from the writeback encoder, which was the only CDM user.
+	 */
+	if (phys_enc->hw_cdm)
+		intf_cfg.cdm = phys_enc->hw_cdm->idx;
 	ctl->ops.setup_intf_cfg(ctl, &intf_cfg);
 
 	/* setup which pp blk will connect to this intf */
@@ -453,6 +461,8 @@ static void dpu_encoder_phys_cmd_enable_helper(
 		struct dpu_encoder_phys *phys_enc)
 {
 	struct dpu_hw_ctl *ctl;
+	const struct msm_format *fmt;
+	u32 fmt_fourcc;
 
 	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid arg(s), encoder %d\n", phys_enc != NULL);
@@ -461,10 +471,35 @@ static void dpu_encoder_phys_cmd_enable_helper(
 
 	dpu_encoder_helper_split_config(phys_enc, phys_enc->hw_intf->idx);
 
+	/*
+	 * Only a DSC native 4:2:2 panel gets a YUV format back here; in every
+	 * other case get_drm_fmt() returns RGB and setup_cdm() unbinds CDM rather
+	 * than programming it.
+	 *
+	 * OUTPUT_HDMI and not OUTPUT_WB, because that is what turns the packer on
+	 * (CDM_HDMI_PACK_OP_MODE = EN | CHROMA_H2V1 << 1 = 0x3) and interleaves
+	 * the output as Y0 Cb Y1 Cr. WB leaves it planar -- writeback's consumer
+	 * is memory, while DSC's input wants the packed form, the same one the DP
+	 * path asks for. Getting this wrong looks like a picture that is
+	 * structurally broken but carries real colour: the chroma is flowing, just
+	 * not where the decoder reads it.
+	 */
+	fmt_fourcc = dpu_encoder_get_drm_fmt(phys_enc);
+	fmt = mdp_get_format(&phys_enc->dpu_kms->base, fmt_fourcc, 0);
+	dpu_encoder_helper_phys_setup_cdm(phys_enc, fmt, CDM_CDWN_OUTPUT_HDMI);
+
 	_dpu_encoder_phys_cmd_pingpong_config(phys_enc);
 
 	ctl = phys_enc->hw_ctl;
 	ctl->ops.update_pending_flush_intf(ctl, phys_enc->hw_intf->idx);
+
+	/*
+	 * The flush bit is what splices CDM into the data path. Without it the
+	 * registers take the write and read back correctly while the block stays
+	 * bypassed -- the same trap the SPR work fell into twice.
+	 */
+	if (ctl->ops.update_pending_flush_cdm && phys_enc->hw_cdm)
+		ctl->ops.update_pending_flush_cdm(ctl, phys_enc->hw_cdm->idx);
 }
 
 static void dpu_encoder_phys_cmd_enable(struct dpu_encoder_phys *phys_enc)

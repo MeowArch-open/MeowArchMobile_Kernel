@@ -177,6 +177,13 @@ const struct qmi_elem_info ipa_init_complete_ind_ei[] = {
 		.elem_size	=
 			sizeof_field(struct ipa_init_complete_ind,
 				     status),
+		/* Qualcomm's own EI table for this indication really does number
+		 * its one mandatory field 0x02, like the result field of a
+		 * response -- confirmed against ipa_qmi_service_v01.c.  The
+		 * FAILURE / MALFORMED_MSG the modem answers with is not about
+		 * this; it is about the indication being addressed to the
+		 * modem's server instead of the client that registered for it.
+		 */
 		.tlv_type	= 0x02,
 		.offset		= offsetof(struct ipa_init_complete_ind,
 					   status),
@@ -717,6 +724,104 @@ const struct qmi_elem_info ipa_init_modem_driver_rsp_ei[] = {
 		.tlv_type	= 0x12,
 		.offset		= offsetof(struct ipa_init_modem_driver_rsp,
 					   modem_driver_init_pending),
+	},
+	{
+		.data_type	= QMI_EOTI,
+	},
+};
+
+/* Element info for the nested filter handle to hardware index map */
+static const struct qmi_elem_info ipa_filter_index_map_ei[] = {
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	=
+			sizeof_field(struct ipa_filter_index_map,
+				     filter_handle),
+		.offset		= offsetof(struct ipa_filter_index_map,
+					   filter_handle),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	=
+			sizeof_field(struct ipa_filter_index_map,
+				     filter_index),
+		.offset		= offsetof(struct ipa_filter_index_map,
+					   filter_index),
+	},
+	{
+		.data_type	= QMI_EOTI,
+	},
+};
+
+/* Element info for the FILTER_INSTALLED_NOTIF request.  The numbering and the
+ * on-the-wire widths (install_status is two bytes, every list length is one)
+ * come from Qualcomm's own ipa_qmi_service_v01.c.
+ */
+const struct qmi_elem_info ipa_fltr_installed_notif_req_ei[] = {
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	=
+			sizeof_field(struct ipa_fltr_installed_notif_req,
+				     source_pipe_index),
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   source_pipe_index),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_2_BYTE,
+		.elem_len	= 1,
+		.elem_size	=
+			sizeof_field(struct ipa_fltr_installed_notif_req,
+				     install_status),
+		.tlv_type	= 0x02,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   install_status),
+	},
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.tlv_type	= 0x03,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   filter_index_list_len),
+	},
+	{
+		.data_type	= QMI_STRUCT,
+		.elem_len	= IPA_QMI_MAX_FILTERS,
+		.elem_size	= sizeof(struct ipa_filter_index_map),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x03,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   filter_index_list),
+		.ei_array	= ipa_filter_index_map_ei,
+	},
+	{
+		.data_type	= QMI_OPT_FLAG,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.tlv_type	= 0x17,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   rule_id_valid),
+	},
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.tlv_type	= 0x17,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   rule_id_len),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= IPA_QMI_MAX_FILTERS,
+		.elem_size	= sizeof(u32),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x17,
+		.offset		= offsetof(struct ipa_fltr_installed_notif_req,
+					   rule_id),
 	},
 	{
 		.data_type	= QMI_EOTI,

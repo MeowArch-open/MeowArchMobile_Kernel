@@ -8,10 +8,28 @@
 #include "msm_drv.h"
 #include "dpu_kms.h"
 #include "dpu_hw_mdss.h"
+#include <linux/moduleparam.h>
+
 #include "dpu_hw_util.h"
 
 /* using a file static variables for debugfs access */
 static u32 dpu_hw_util_log_mask = DPU_DBG_MASK_NONE;
+
+/*
+ * Also a module parameter, not only a debugfs knob, because the interesting
+ * register programming happens during the first modeset -- before anything can
+ * write to debugfs. dpu_encoder_prep_dsc(), which programs the whole DSC encoder
+ * block, runs on a full modeset only and not on a DPMS cycle, so setting the mask
+ * afterwards captures nothing.
+ *
+ *	msm.hw_log_mask=0x800     (DPU_DBG_MASK_DSC, 1 << 11)
+ *
+ * needs drm.debug to include DRIVER (0x02) as well, since the writes are logged
+ * through DRM_DEBUG_DRIVER.
+ */
+module_param_named(hw_log_mask, dpu_hw_util_log_mask, uint, 0600);
+MODULE_PARM_DESC(hw_log_mask,
+		 "DPU block mask for logging every register write (see DPU_DBG_MASK_*)");
 
 /* DPU_SCALER_QSEED3 */
 #define QSEED3_HW_VERSION                  0x00
