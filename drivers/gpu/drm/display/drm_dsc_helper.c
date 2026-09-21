@@ -79,6 +79,37 @@ int drm_dsc_dp_rc_buffer_size(u8 rc_buffer_block_size, u8 rc_buffer_size)
 }
 EXPORT_SYMBOL(drm_dsc_dp_rc_buffer_size);
 
+/*
+ * Whether to double bits_per_pixel when packing pps4/pps5 on a native 4:2:2
+ * link. The vendor stack does (sde_dsc_helper.c:733), and the arithmetic reason
+ * is sound -- the encoder works on half the pixels per line, so each carries
+ * twice the bits -- but on zorn (o11 42 02 0a) turning it on produced a black
+ * panel where leaving it off produces a corrupted picture, so it is not settled
+ * which the panel actually wants. 0 = upstream behaviour.
+ *
+ *	echo 1 > /sys/module/drm_display_helper/parameters/dsc_pps_bpp_double
+ *	echo 1 > /sys/class/graphics/fb0/blank; sleep 2
+ *	echo 0 > /sys/class/graphics/fb0/blank
+ *
+ * The blank cycle is required: the PPS is only sent from the panel's prepare().
+ */
+static bool dsc_pps_bpp_double;
+module_param(dsc_pps_bpp_double, bool, 0600);
+MODULE_PARM_DESC(dsc_pps_bpp_double,
+		 "Double PPS bits_per_pixel on native 4:2:2 (0 = upstream)");
+
+/*
+ * bits_per_pixel as the PPS carries it, which is not always the configured
+ * value: see the comment at PPS 4 in drm_dsc_pps_payload_pack().
+ */
+static u16 drm_dsc_pps_bpp(const struct drm_dsc_config *dsc_cfg)
+{
+	if (dsc_cfg->native_422 && dsc_pps_bpp_double)
+		return dsc_cfg->bits_per_pixel * 2;
+
+	return dsc_cfg->bits_per_pixel;
+}
+
 /**
  * drm_dsc_pps_payload_pack() - Populates the DSC PPS
  *
@@ -120,8 +151,22 @@ void drm_dsc_pps_payload_pack(struct drm_dsc_picture_parameter_set *pps_payload,
 		dsc_cfg->bits_per_component << DSC_PPS_BPC_SHIFT;
 
 	/* PPS 4 */
+	/*
+	 * bits_per_pixel goes into the PPS doubled when chroma is subsampled: the
+	 * encoder works on half the pixels per line, so each of them carries twice
+	 * the bits. The vendor stack does exactly this before packing pps4/pps5
+	 * (sde_dsc_helper.c: bpp = 2 * bpp for native_422 || native_420).
+	 *
+	 * Without it the panel is told 8.0 bpp for a stream encoded at the 16.0 bpp
+	 * equivalent, so its decoder takes bits at half the rate the encoder put
+	 * them in and every group after the first is garbage -- and no amount of
+	 * fixing the DPU-side registers can change that, because the error is in
+	 * what the panel was told, not in what was sent.
+	 *
+	 * 4:2:0 is left alone: no in-tree user has been verified against hardware.
+	 */
 	pps_payload->pps_4 =
-		((dsc_cfg->bits_per_pixel & DSC_PPS_BPP_HIGH_MASK) >>
+		((drm_dsc_pps_bpp(dsc_cfg) & DSC_PPS_BPP_HIGH_MASK) >>
 		 DSC_PPS_MSB_SHIFT) |
 		dsc_cfg->vbr_enable << DSC_PPS_VBR_EN_SHIFT |
 		dsc_cfg->simple_422 << DSC_PPS_SIMPLE422_SHIFT |
@@ -130,7 +175,7 @@ void drm_dsc_pps_payload_pack(struct drm_dsc_picture_parameter_set *pps_payload,
 
 	/* PPS 5 */
 	pps_payload->bits_per_pixel_low =
-		(dsc_cfg->bits_per_pixel & DSC_PPS_LSB_MASK);
+		(drm_dsc_pps_bpp(dsc_cfg) & DSC_PPS_LSB_MASK);
 
 	/*
 	 * The DSC panel expects the PPS packet to have big endian format
@@ -1319,8 +1364,25 @@ int drm_dsc_compute_rc_parameters(struct drm_dsc_config *vdsc_cfg)
 	unsigned long hrd_delay = 0;
 	unsigned long final_scale = 0;
 	unsigned long rbs_min = 0;
+	unsigned long bpp_eff;
 
-	if (vdsc_cfg->native_420 || vdsc_cfg->native_422) {
+	/*
+	 * With subsampled chroma the encoder works on half the pixels per line at
+	 * twice the bits per pixel, and both halves of that matter:
+	 * groups_per_line follows the halved width, while the chunk size has to
+	 * come out as the full-width byte count. Halving the width without
+	 * doubling bits_per_pixel -- which is what this did for 4:2:2 -- makes the
+	 * stream carry half the bytes per line that its decoder expects.
+	 *
+	 * The vendor stack for this hardware does exactly the pair (sde_dsc_helper.c:
+	 * slice_width_mod = slice_width / 2; bpp = bpp * 2), and its registers
+	 * confirm the result: a 720-wide native 4:2:2 slice at 8 bpp gives
+	 * chunk_size 720 and groups_per_line 120.
+	 *
+	 * 4:2:0 is left as it was: no in-tree user has been checked against
+	 * hardware, and i915 depends on the current behaviour.
+	 */
+	if (vdsc_cfg->native_420) {
 		/* Number of groups used to code each line of a slice */
 		groups_per_line = DIV_ROUND_UP(vdsc_cfg->slice_width / 2,
 					       DSC_RC_PIXELS_PER_GROUP);
@@ -1328,6 +1390,13 @@ int drm_dsc_compute_rc_parameters(struct drm_dsc_config *vdsc_cfg)
 		/* chunksize in Bytes */
 		vdsc_cfg->slice_chunk_size = DIV_ROUND_UP(vdsc_cfg->slice_width / 2 *
 							  vdsc_cfg->bits_per_pixel,
+							  (8 * 16));
+	} else if (vdsc_cfg->native_422) {
+		groups_per_line = DIV_ROUND_UP(vdsc_cfg->slice_width / 2,
+					       DSC_RC_PIXELS_PER_GROUP);
+
+		vdsc_cfg->slice_chunk_size = DIV_ROUND_UP(vdsc_cfg->slice_width / 2 *
+							  vdsc_cfg->bits_per_pixel * 2,
 							  (8 * 16));
 	} else {
 		/* Number of groups used to code each line of a slice */
@@ -1369,9 +1438,24 @@ int drm_dsc_compute_rc_parameters(struct drm_dsc_config *vdsc_cfg)
 	else
 		vdsc_cfg->scale_decrement_interval = DSC_SCALE_DECREMENT_INTERVAL_MAX;
 
+	/*
+	 * Same doubling as above: with 4:2:2 each group carries half as many
+	 * pixels, so the encoder's effective bits per pixel is twice the
+	 * configured value. The vendor stack applies it here too --
+	 * sde_dsc_helper.c doubles bpp for native_422/420 and then computes
+	 * final_value = rc_model_size - initial_xmit_delay * bpp + mux_bits.
+	 *
+	 * Without it final_offset comes out too large, and final_scale and
+	 * scale_increment_interval follow it: on a 720-wide 4:2:2 slice at 8 bpp
+	 * with initial_xmit_delay 256, the hardware wants final_offset 4432 and
+	 * scale_increment_interval 163, not 6480 and 66.
+	 */
+	bpp_eff = vdsc_cfg->native_422 ? vdsc_cfg->bits_per_pixel * 2
+				       : vdsc_cfg->bits_per_pixel;
+
 	vdsc_cfg->final_offset = vdsc_cfg->rc_model_size -
-		(vdsc_cfg->initial_xmit_delay *
-		 vdsc_cfg->bits_per_pixel + 8) / 16 + num_extra_mux_bits;
+		(vdsc_cfg->initial_xmit_delay * bpp_eff + 8) / 16 +
+		num_extra_mux_bits;
 
 	if (vdsc_cfg->final_offset >= vdsc_cfg->rc_model_size) {
 		DRM_DEBUG_KMS("FinalOfs < RcModelSze for this InitialXmitDelay\n");

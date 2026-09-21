@@ -34,6 +34,15 @@
 #include "dpu_core_perf.h"
 #include "dpu_trace.h"
 
+/*
+ * Flush the SPR sub-block through the CTL so its shadow registers go active.
+ * See _dpu_crtc_setup_cp_blocks(). Off restores the behaviour where SPR is
+ * programmed but never takes effect.
+ */
+static bool dpu_spr_flush = true;
+module_param_named(spr_flush, dpu_spr_flush, bool, 0600);
+MODULE_PARM_DESC(spr_flush, "CTL-flush the SPR sub-block so its writes go live");
+
 /* layer mixer index on dpu_crtc */
 #define LEFT_MIXER 0
 #define RIGHT_MIXER 1
@@ -894,6 +903,41 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 			/* stage config flush mask */
 			ctl->ops.update_pending_flush_dspp(ctl,
 				mixer[i].hw_dspp->idx, DPU_DSPP_GC);
+		}
+
+		/*
+		 * SPR is a property of the panel's subpixel layout, not of any
+		 * userspace colour-management state, so it is programmed
+		 * unconditionally rather than from a CRTC property.
+		 *
+		 * Every mixer's DSPP gets the *same* configuration. That is not
+		 * an assumption: SPR_0 and SPR_1 were read out of a running
+		 * Android and are identical, down to the mixer count in +0x08.
+		 *
+		 * Like PCC and GC, the sub-block is double buffered, so the
+		 * writes only go active once the CTL flushes them -- the same
+		 * CTL_DSPP_n_FLUSH bit 8 the vendor sets from its reg_dma path
+		 * (dspp_sub_blk_flush_tbl[SDE_DSPP_SPR]). Without that flush the
+		 * whole SPR window reads back exactly what was written while the
+		 * block's read-only width at +0x10 stays zero, where both the
+		 * bootloader and a running Android report 720 + 720: written,
+		 * shadowed, never active. That is the reason nothing about SPR --
+		 * enabling it, disabling it, correcting its phase offsets --
+		 * changed a single pixel.
+		 *
+		 * An earlier attempt at this flush ended in
+		 * dpu_encoder_phys_cmd_prepare_for_kickoff timing out with
+		 * "failed wait_for_idle ... pp:0" and a black panel. That was
+		 * with the phase offsets one word high and the second mixer's
+		 * window aimed at SPR_2, so it is worth one more try; the
+		 * parameter makes it recoverable over ssh instead of a rebuild.
+		 */
+		if (dspp->ops.setup_spr) {
+			dspp->ops.setup_spr(dspp, true);
+
+			if (dpu_spr_flush && ctl->ops.update_pending_flush_dspp)
+				ctl->ops.update_pending_flush_dspp(ctl, dspp->idx,
+								   DPU_DSPP_SPR);
 		}
 	}
 }

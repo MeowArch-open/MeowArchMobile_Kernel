@@ -15,6 +15,19 @@
 #include "common.h"
 #include "sdw.h"
 
+/*
+ * 32 by default for zorn: the SIA9187 amplifiers on the secondary link want the
+ * 64-bit frame two 32-bit channels make, which is what the vendor's own driver
+ * logs on Android ("i2s width: 32"). At 16 the parts report framing errors.
+ */
+static int sc8280xp_mi2s_width = 32;
+module_param_named(mi2s_width, sc8280xp_mi2s_width, int, 0644);
+MODULE_PARM_DESC(mi2s_width, "sample width forced on the secondary MI2S link (16 or 32)");
+
+static int sc8280xp_mi2s_channels = 2;
+module_param_named(mi2s_channels, sc8280xp_mi2s_channels, int, 0644);
+MODULE_PARM_DESC(mi2s_channels, "channel count forced on the secondary MI2S link");
+
 struct sc8280xp_snd_data {
 	bool stream_prepared[AFE_PORT_MAX];
 	struct snd_soc_card *card;
@@ -82,6 +95,30 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	channels->min = 2;
 	channels->max = 2;
 	switch (cpu_dai->id) {
+	case SECONDARY_MI2S_RX:
+		/*
+		 * zorn's speaker amplifiers are configured by their vendor
+		 * parameter file for the frame the vendor's own TDM link sends,
+		 * and that link is four slots (qcom,tdm-max-slots = <4>). Two
+		 * 16-bit channels only make a 32-bit frame, so the sample width
+		 * is a knob here: 32 bits per channel gives the 64-bit frame a
+		 * four-slot 16-bit link has.
+		 */
+		if (sc8280xp_mi2s_width == 32) {
+			/*
+			 * snd_mask_set_format() only adds to the mask, and the
+			 * S16_LE set above is still in it and still the lowest,
+			 * so it is the one that wins. Clear the mask to actually
+			 * force a width.
+			 */
+			snd_mask_none(fmt);
+			snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S32_LE);
+		}
+		channels->min = channels->max = sc8280xp_mi2s_channels;
+		dev_info(rtd->card->dev,
+			 "fixup_dbg: SECONDARY_MI2S_RX width %d channels %d\n",
+			 sc8280xp_mi2s_width, sc8280xp_mi2s_channels);
+		break;
 	case TX_CODEC_DMA_TX_0:
 	case TX_CODEC_DMA_TX_1:
 	case TX_CODEC_DMA_TX_2:

@@ -20,6 +20,72 @@
 #define IPA_QMI_INIT_COMPLETE		0x22	/* AP -> modem indication */
 #define IPA_QMI_DRIVER_INIT_COMPLETE	0x35	/* modem -> AP request */
 
+/* Messages this modem sends that mainline has no implementation for.  Ids
+ * confirmed against Qualcomm's ipa_qmi_service_v01.h and against what actually
+ * arrives on the wire (see the ipa_qmi.c snoop).
+ *
+ *   0x23 INSTALL_FILTER_RULE     modem -> AP request, ~1.5 KB of filter specs
+ *   0x24 FILTER_INSTALLED_NOTIF  modem -> AP request
+ *   0x27 CONFIG                  modem -> AP request
+ */
+#define IPA_QMI_INSTALL_FILTER_RULE	0x23	/* modem -> AP request */
+#define IPA_QMI_FILTER_INSTALLED_NOTIF	0x24	/* modem -> AP request */
+#define IPA_QMI_CONFIG			0x27	/* modem -> AP request */
+
+/* Wire layout of one ipa_filter_spec_ex_type_v01, as this MPSS encodes it:
+ *
+ *     0   u32  ip_type
+ *     4   ...  filter_rule (struct ipa_filter_rule_type_v01, 150 bytes)
+ *   154   u32  filter_action
+ *   158   u8   is_routing_table_index_valid
+ *   159   u32  route_table_index
+ *   163   u8   is_mux_id_valid
+ *   164   u32  mux_id
+ *   168   u32  rule_id
+ *   172   u8   is_rule_hashable
+ *
+ * Only the rule id matters to us -- it is the identifier the modem expects back
+ * in the response -- so the rest stays opaque.  The element size was confirmed
+ * from a captured request: 9 specs in 1558 bytes, one byte of count and no
+ * remainder.
+ */
+#define IPA_QMI_FILTER_SPEC_EX_TLV	0x15
+#define IPA_QMI_FILTER_SPEC_EX_SZ	173
+#define IPA_QMI_FILTER_SPEC_EX_RULE_ID	168
+
+/* QMI_IPA_MAX_FILTERS_EX_V01 */
+#define IPA_QMI_MAX_FILTERS		128
+
+/* Request message for the FILTER_INSTALLED_NOTIF request (AP -> modem).
+ *
+ * After the modem asks the AP to install its uplink filter specs, the AP is
+ * expected to report back where they went: the pipe they were installed on, an
+ * overall status, and a handle-to-index map.  Only the first three fields are
+ * mandatory; the rule id list is how the AP acknowledges specs that arrived
+ * through filter_spec_ex_list.
+ */
+struct ipa_filter_index_map {
+	u32			filter_handle;
+	u32			filter_index;
+};
+
+struct ipa_fltr_installed_notif_req {
+	u32			source_pipe_index;
+	u16			install_status;
+	u32			filter_index_list_len;
+	struct ipa_filter_index_map filter_index_list[IPA_QMI_MAX_FILTERS];
+
+	u8			rule_id_valid;
+	u32			rule_id_len;
+	u32			rule_id[IPA_QMI_MAX_FILTERS];
+};
+
+#define IPA_QMI_FILTER_INSTALLED_NOTIF_REQ_SZ				\
+	(3 + 4 + 3 + 2 + 3 + 1 + IPA_QMI_MAX_FILTERS * 8		\
+	 + 3 + 1 + IPA_QMI_MAX_FILTERS * 4)
+
+extern const struct qmi_elem_info ipa_fltr_installed_notif_req_ei[];
+
 /* The maximum size required for message types.  These sizes include
  * the message data, along with type (1 byte) and length (2 byte)
  * information for each field.  The qmi_send_*() interfaces require
@@ -33,9 +99,17 @@
 #define IPA_QMI_DRIVER_INIT_COMPLETE_REQ_SZ	4	/* -> server handle */
 #define IPA_QMI_DRIVER_INIT_COMPLETE_RSP_SZ	7	/* <- server handle */
 
-/* Maximum size of messages we expect the AP to receive (max of above) */
-#define IPA_QMI_SERVER_MAX_RCV_SZ		8
-#define IPA_QMI_CLIENT_MAX_RCV_SZ		25
+/* Maximum size of messages we expect the AP to receive (max of above)
+ *
+ * zorn (SM8650, MPSS.DE.5.0): these were 8 and 25, sized for the four messages
+ * mainline implements.  QRTR is a datagram socket, so anything longer than
+ * recv_buf_size is *truncated* by qrtr_recvmsg() and the rest is discarded --
+ * a larger request from the modem (e.g. INSTALL_FILTER_RULE, whose filter spec
+ * list runs to hundreds of bytes) can never be read even in principle.  Use a
+ * page so we can at least see what the modem sends.
+ */
+#define IPA_QMI_SERVER_MAX_RCV_SZ		4096
+#define IPA_QMI_CLIENT_MAX_RCV_SZ		4096
 
 /* Request message for the IPA_QMI_INDICATION_REGISTER request */
 struct ipa_indication_register_req {

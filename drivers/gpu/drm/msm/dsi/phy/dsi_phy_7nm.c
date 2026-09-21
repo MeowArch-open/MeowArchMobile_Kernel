@@ -38,6 +38,39 @@
  *                                                  dsi0_pll_post_out_div_clk
  */
 
+/*
+ * Override the 14 CMN_TIMING_CTRL registers with values supplied by hand.
+ *
+ * mainline computes D-PHY timings from the bit clock. Vendor device trees instead
+ * ship a measured set -- zorn's panel has
+ *
+ *	qcom,mdss-dsi-panel-phy-timings = [00 27 0A 0A 1B 19 0A 0B 0A 02 04 00 20 0F];
+ *
+ * which is 0 39 10 10 27 25 10 11 10 2 4 0 32 15, i.e. exactly these fourteen
+ * registers in order: positions 0, 9, 10 and 11 hold 0, 2, 4, 0, the same
+ * constants the code below writes literally, which is what confirms the mapping.
+ *
+ * Worth having because the remaining corruption on this panel is
+ * content-dependent -- flat colour is perfect, dense text bands once per DSC
+ * slice row -- and that is what a marginal high-speed link looks like:
+ * compressed detail is high-entropy and stresses the PHY, compressed flat colour
+ * does not, and one bit error ruins the slice it lands in. Every DSC parameter
+ * and both link rates have already been ruled out.
+ *
+ *	echo 0,39,10,10,27,25,10,11,10,2,4,0,32,15 > \
+ *		/sys/module/msm/parameters/dsi_phy_timing
+ *	echo 1 > /sys/class/graphics/fb0/blank; sleep 2
+ *	echo 0 > /sys/class/graphics/fb0/blank
+ *
+ * Fewer than 14 values = use the computed timings.
+ */
+static u8 dsi_phy_timing[14];
+static int dsi_phy_timing_count;
+module_param_array_named(dsi_phy_timing, dsi_phy_timing, byte,
+			 &dsi_phy_timing_count, 0600);
+MODULE_PARM_DESC(dsi_phy_timing,
+		 "14 raw CMN_TIMING_CTRL_0..13 values (default: computed)");
+
 #define VCO_REF_CLK_RATE		19200000
 #define FRAC_BITS 18
 
@@ -1165,6 +1198,13 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
 		writel(0x02, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_9);
 		writel(0x04, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_10);
 		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_11);
+	} else if (dsi_phy_timing_count == ARRAY_SIZE(dsi_phy_timing)) {
+		int i;
+
+		DBG("DSI%d using supplied PHY timings", phy->id);
+		for (i = 0; i < ARRAY_SIZE(dsi_phy_timing); i++)
+			writel(dsi_phy_timing[i],
+			       base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0 + 4 * i);
 	} else {
 		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0);
 		writel(timing->clk_zero, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_1);

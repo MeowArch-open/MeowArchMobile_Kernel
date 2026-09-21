@@ -1452,11 +1452,16 @@ static int msm_gpio_init(struct msm_pinctrl *pctrl)
 	girq->parents[0] = pctrl->irq;
 	girq->init_valid_mask = msm_gpio_irq_init_valid_mask;
 
+	dev_info(pctrl->dev, "TLMMDBG 7: wakeup-parent done, adding gpiochip ngpio=%u\n",
+		 ngpio);
+
 	ret = devm_gpiochip_add_data(pctrl->dev, &pctrl->chip, pctrl);
 	if (ret) {
 		dev_err(pctrl->dev, "Failed register gpiochip\n");
 		return ret;
 	}
+
+	dev_info(pctrl->dev, "TLMMDBG 8: gpiochip added\n");
 
 	/*
 	 * For DeviceTree-supported systems, the gpio core checks the
@@ -1577,11 +1582,18 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 		pctrl->phys_base[0] = res->start;
 	}
 
+	dev_info(&pdev->dev, "TLMMDBG 1: regs mapped, phys_base=%pa\n",
+		 &pctrl->phys_base[0]);
+
 	msm_pinctrl_setup_pm_reset(pctrl);
+
+	dev_info(&pdev->dev, "TLMMDBG 2: pm_reset done\n");
 
 	pctrl->irq = platform_get_irq(pdev, 0);
 	if (pctrl->irq < 0)
 		return pctrl->irq;
+
+	dev_info(&pdev->dev, "TLMMDBG 3: irq=%d\n", pctrl->irq);
 
 	pctrl->desc.owner = THIS_MODULE;
 	pctrl->desc.pctlops = &msm_pinctrl_ops;
@@ -1597,6 +1609,9 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 		return dev_err_probe(&pdev->dev, ret,
 				     "Couldn't register pinctrl driver\n");
 
+	dev_info(&pdev->dev, "TLMMDBG 4: pinctrl registered, npins=%d\n",
+		 pctrl->desc.npins);
+
 	for (i = 0; i < soc_data->nfunctions; i++) {
 		func = &soc_data->functions[i];
 
@@ -1610,9 +1625,14 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 		return dev_err_probe(&pdev->dev, ret,
 				     "Couldn't enable pinctrl driver\n");
 
+	dev_info(&pdev->dev, "TLMMDBG 5: %d pinfunctions added, calling msm_gpio_init\n",
+		 soc_data->nfunctions);
+
 	ret = msm_gpio_init(pctrl);
 	if (ret)
 		return ret;
+
+	dev_info(&pdev->dev, "TLMMDBG 9: msm_gpio_init done\n");
 
 	platform_set_drvdata(pdev, pctrl);
 
