@@ -1034,7 +1034,8 @@ static int o11_42_02_0a_dsc_probe(struct mipi_dsi_device *dsi)
 	 * sets qcom,mdss-dsi-tx-eot-append, so EoT packets are wanted.
 	 */
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM |
+			  MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT;
 
 	ctx->panel.prepare_prev_first = true;
 
