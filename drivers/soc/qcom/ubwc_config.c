@@ -196,21 +196,19 @@ const struct qcom_ubwc_cfg_data *qcom_ubwc_config_get_data(void)
 	}
 
 	hbb = qcom_smem_dram_get_hbb();
-	if (hbb == -ENODATA) {
-		/* Lack of HBB data is OK - it was only introduced later */
-		return data;
-	} else if (hbb < 0) {
-		pr_err("Couldn't get HBB data from SMEM: %d\n", hbb);
-		return ERR_PTR(hbb);
-	}
 
-	cfg = kmemdup(data, sizeof(*data), GFP_KERNEL);
-	if (!cfg)
-		return ERR_PTR(-ENOMEM);
+	/*
+	 * zorn 花屏 diag (2026-10-02): v7.3 added this runtime SMEM override of
+	 * highest_bank_bit; the working v7.2.8 tree used the static per-SoC hbb
+	 * unconditionally (sm8650 -> hbb 16). Log both values and FORCE the
+	 * static one, restoring v7.2.8 behaviour, to test whether this override
+	 * is the AR30/UBWC garbled-display root cause. Revert to re-enable the
+	 * override once confirmed.
+	 */
+	pr_info("zorn-ubwc-diag: static hbb=%d, SMEM hbb=%d -> forcing static (override bypassed)\n",
+		data->highest_bank_bit, hbb);
 
-	cfg->highest_bank_bit = hbb;
-
-	return cfg;
+	return data;
 }
 EXPORT_SYMBOL_GPL(qcom_ubwc_config_get_data);
 
