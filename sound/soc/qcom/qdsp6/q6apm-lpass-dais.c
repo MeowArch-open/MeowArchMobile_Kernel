@@ -526,15 +526,6 @@ static const struct snd_soc_dai_ops q6i2s_ops = {
 	.trigger	= q6apm_lpass_dai_trigger,
 };
 
-static const struct snd_soc_dai_ops q6tdm_ops = {
-	.prepare	= q6apm_lpass_dai_prepare,
-	.startup	= q6apm_lpass_dai_startup,
-	.shutdown	= q6apm_lpass_dai_shutdown,
-	.set_channel_map  = q6dma_set_channel_map,
-	.hw_params        = q6dma_hw_params,
-	.set_fmt	= q6i2s_set_fmt,
-};
-
 static const struct snd_soc_dai_ops q6hdmi_ops = {
 	.prepare	= q6apm_lpass_dai_prepare,
 	.startup	= q6apm_lpass_dai_startup,
