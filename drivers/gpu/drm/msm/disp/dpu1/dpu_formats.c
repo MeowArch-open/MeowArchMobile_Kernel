@@ -361,4 +361,37 @@ void dpu_format_populate_addrs(struct drm_framebuffer *fb,
 		_dpu_format_populate_addrs_ubwc(fb, layout);
 	else
 		_dpu_format_populate_addrs_linear(fb, layout);
+
+	/*
+	 * zorn scanout-layout diag: SEE the exact geometry the DPU is told to
+	 * fetch on the 花屏 kernel. dpu_formats.c is byte-identical good<->bad,
+	 * so this output is deterministic from (fmt, fb w/h, base iova); the
+	 * only runtime variable that could regress is the modifier/plane-count
+	 * core-DRM negotiated into the fb. Rate-limited: first few, then sparse.
+	 */
+	{
+		static atomic_t _zdiag_n = ATOMIC_INIT(0);
+		int zc = atomic_inc_return(&_zdiag_n);
+
+		if (zc <= 8 || (zc % 240) == 0) {
+			pr_info("zorn-layout-diag[%d]: fb=%u %ux%u fourcc=0x%08x mod=0x%016llx "
+				"flags: ubwc=%d tile=%d yuv=%d dx=%d num_planes=%u\n",
+				zc, fb->base.id, fb->width, fb->height,
+				fmt->pixel_format, fb->modifier,
+				MSM_FORMAT_IS_UBWC(fmt), MSM_FORMAT_IS_TILE(fmt),
+				MSM_FORMAT_IS_YUV(fmt), MSM_FORMAT_IS_DX(fmt),
+				layout->num_planes);
+			pr_info("zorn-layout-diag[%d]:   P0 pitch=%u size=%u addr=0x%08x | "
+				"P1 pitch=%u size=%u addr=0x%08x\n",
+				zc, layout->plane_pitch[0], layout->plane_size[0],
+				layout->plane_addr[0], layout->plane_pitch[1],
+				layout->plane_size[1], layout->plane_addr[1]);
+			pr_info("zorn-layout-diag[%d]:   P2 pitch=%u size=%u addr=0x%08x | "
+				"P3 pitch=%u size=%u addr=0x%08x | total=%u base=0x%08x\n",
+				zc, layout->plane_pitch[2], layout->plane_size[2],
+				layout->plane_addr[2], layout->plane_pitch[3],
+				layout->plane_size[3], layout->plane_addr[3],
+				layout->total_size, msm_framebuffer_iova(fb, 0));
+		}
+	}
 }

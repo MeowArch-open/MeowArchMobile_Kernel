@@ -327,6 +327,31 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_RC_CONFIG, data);
 
+	/*
+	 * zorn 7.3 hua-ping phase-3 (2026-10-02): host side pclk/byte_clk/fmt already
+	 * match Android (160/150, slice_per_pkt=1, native_422) yet still snows ->
+	 * isolate whether the DSC *compressed bitstream params* differ from the good
+	 * 7.2.7 panel blob (e1484ea2). Dump the complete PPS the DPU ships to the
+	 * panel decoder; if this matches Android's values, the divergence is upstream
+	 * in encoder timing, not the PPS table.
+	 */
+	pr_info("zorn-dppsprobe: ver 1.%u bpc=%u bpp=%u lbd=%u slice_chunk=%u slice_count=%u slice_w=%u slice_h=%u pic_w=%u pic_h=%u\n"
+		"  nfl_bpg=%u slice_bpg=%u init_xmit_delay=%u init_dec_delay=%u scale_inc=%u scale_dec=%u\n"
+		"  init_offset=%u final_offset=%u flbpg=%u sl2bpg=%u rc_model=%u rc_edge=%u fminqp=%u fmaxqp=%u\n"
+		"  native_422=%u native_420=%u convert_rgb=%u block_pred=%u\n",
+		dsc->dsc_version_minor, dsc->bits_per_component, dsc->bits_per_pixel,
+		dsc->line_buf_depth, dsc->slice_chunk_size, dsc->slice_count,
+		dsc->slice_width, dsc->slice_height, dsc->pic_width, dsc->pic_height,
+		dsc->nfl_bpg_offset, dsc->slice_bpg_offset,
+		dsc->initial_xmit_delay, dsc->initial_dec_delay,
+		dsc->scale_increment_interval, dsc->scale_decrement_interval,
+		dsc->initial_offset, dsc->final_offset,
+		dsc->first_line_bpg_offset, dsc->second_line_bpg_offset,
+		dsc->rc_model_size, dsc->rc_edge_factor,
+		dsc->flatness_min_qp, dsc->flatness_max_qp,
+		dsc->native_422, dsc->native_420, dsc->convert_rgb,
+		dsc->block_pred_enable);
+
 	/* program the dsc wrapper */
 	data = BIT(0); /* encoder enable */
 	if (dsc->native_422)

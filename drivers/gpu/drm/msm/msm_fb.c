@@ -207,6 +207,27 @@ msm_framebuffer_init(struct drm_device *dev, const struct drm_format_info *info,
 
 	refcount_set(&msm_fb->dirtyfb, 1);
 
+	/*
+	 * zorn fb-create diag: SEE the as-allocated scanout geometry on the
+	 * 花屏 kernel at the moment the fb is created from userspace addfb2 —
+	 * the UPSTREAM input (fourcc / modifier / num_planes / per-plane
+	 * pitch+offset vs backing-bo size) that msm_framebuffer_init consumes.
+	 * msm_framebuffer_init is byte-identical good<->bad, so a difference
+	 * here would mean core-DRM / mesa negotiated a different buffer.
+	 * Low volume (once per fb object), so always-on, no rate limit.
+	 */
+	{
+		int zi;
+
+		pr_info("zorn-fb-diag: fb=%u %ux%u fourcc=0x%08x mod=0x%016llx num_planes=%d\n",
+			fb->base.id, mode_cmd->width, mode_cmd->height,
+			mode_cmd->pixel_format, mode_cmd->modifier[0], n);
+		for (zi = 0; zi < n; zi++)
+			pr_info("zorn-fb-diag:   plane %d: pitch=%u offset=%u cpp=%u bo_size=%zu\n",
+				zi, mode_cmd->pitches[zi], mode_cmd->offsets[zi],
+				info->cpp[zi], bos[zi]->size);
+	}
+
 	drm_dbg_state(dev, "create: FB ID: %d (%p)\n", fb->base.id, fb);
 
 	return fb;

@@ -772,6 +772,18 @@ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 
 	DBG("pclk=%lu, bclk=%lu", msm_host->pixel_clk_rate,
 				msm_host->byte_clk_rate);
+
+	/*
+	 * zorn 7.3 clock-bandwidth probe (2026-10-02): slice_per_pkt=1 took effect
+	 * yet still snows, so isolate whether pclk/byte_clk are the regression.
+	 */
+	if (msm_host->dsc) {
+		pr_info("zorn-clkprobe: dsc(bpp_param=%lu src_bpp=%d) pclk_scaled=%lu byte_clk_rate=%lu byte_intf_clk_div_2=%u lanes=%u format=%u is_bonded=%u\n",
+			(unsigned long)dsi_dsc_uncompressed_bpp, dsi_dsc_src_bpp(msm_host->dsc),
+			msm_host->pixel_clk_rate, msm_host->byte_clk_rate,
+			msm_host->byte_intf_clk_div_2, msm_host->lanes, (unsigned)msm_host->format,
+			is_bonded_dsi);
+	}
 }
 
 int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
@@ -1106,6 +1118,12 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 			reg_ctrl2, reg_ctrl2 & 0xffff,
 			slice_per_intf, dsc->slice_chunk_size, slice_per_pkt,
 			pkt_per_line, bytes_per_pkt);
+
+		pr_info("zorn-dscprobe: bytes/line=%u slice_chunk=%u slice_cnt=%u slice_per_pkt=%u pkt_per_line=%u bpc=%u hdisplay=%u htotal=%u vdisplay=%u vtotal=%u\n",
+			slice_per_intf * dsc->slice_chunk_size, dsc->slice_chunk_size, slice_per_intf,
+			slice_per_pkt, pkt_per_line, dsc->bits_per_component,
+			msm_host->mode->hdisplay, msm_host->mode->htotal,
+			msm_host->mode->vdisplay, msm_host->mode->vtotal);
 	} else {
 		reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_WC(bytes_per_pkt);
 		dsi_write(msm_host, REG_DSI_VIDEO_COMPRESSION_MODE_CTRL, reg);
@@ -1854,10 +1872,17 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
 	msm_host->mode_flags = dsi->mode_flags;
 	if (dsi->dsc) {
 		msm_host->dsc = dsi->dsc;
-		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
-			msm_host->dsc_slice_per_pkt = dsi->dsc->slice_count;
-		else
-			msm_host->dsc_slice_per_pkt = 1;
+		/*
+		 * zorn 花屏 diag (2026-10-02): the good 7.2.7/7.2.8 mainline ran
+		 * slice_per_pkt=1 (two 720B DSC packets per line). 7.3 added the
+		 * panel's MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT flag + commit 970a1f1f6,
+		 * which flips this to slice_count (=2, one 1440B packet per line) --
+		 * the ONLY panel-driver delta between good and 花屏. Force it back to
+		 * the known-good 1 to test whether that flip is the regression. The
+		 * CMPR_MODE_CTRL pr_info in dsi_update_dsc_timing() confirms
+		 * slice_per_pkt 1 / pkt_per_line 2 actually took effect.
+		 */
+		msm_host->dsc_slice_per_pkt = 1;
 	}
 
 	if (msm_host->format == MIPI_DSI_FMT_RGB101010) {

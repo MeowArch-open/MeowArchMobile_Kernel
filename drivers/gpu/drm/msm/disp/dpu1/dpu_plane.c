@@ -89,6 +89,12 @@ struct dpu_plane {
 };
 
 static const uint64_t supported_format_modifiers[] = {
+	/*
+	 * zorn 花屏 diag (2026-10-02): force-linear already exonerated UBWC
+	 * (LINEAR uncompressed scanout still 花屏). Restore QCOM_COMPRESSED so the
+	 * plane advertises the normal UBWC path (matching the good 7.2.7 config)
+	 * while we isolate the single variable slice_per_pkt=1 in dsi_host.c.
+	 */
 	DRM_FORMAT_MOD_QCOM_COMPRESSED,
 	DRM_FORMAT_MOD_LINEAR,
 	DRM_FORMAT_MOD_INVALID
@@ -1839,6 +1845,10 @@ static struct drm_plane *dpu_plane_init_common(struct drm_device *dev,
 				supported_format_modifiers, type, NULL);
 	if (IS_ERR(pdpu))
 		return ERR_CAST(pdpu);
+
+	/* zorn 花屏 diag: UBWC modifier restored; this build forces slice_per_pkt=1. */
+	pr_info("zorn-slice1-diag: plane pipe=%d type=%d modifiers[0]=0x%016llx (QCOM_COMPRESSED restored, slice_per_pkt forced to 1)\n",
+		pipe, type, supported_format_modifiers[0]);
 
 	/* cache local stuff for later */
 	plane = &pdpu->base;
