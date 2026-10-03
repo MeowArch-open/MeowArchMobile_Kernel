@@ -1,0 +1,213 @@
+From 13c62c8115f60347320b2faa543a9838f0b63de4 Mon Sep 17 00:00:00 2001
+From: xingguangcuican6666 <xingguangcuican666@foxmail.com>
+Date: Sat, 3 Oct 2026 12:36:20 +0800
+Subject: [PATCH 6/6] drm/msm: preserve the tested zorn 7.3-rc5 display
+ snapshot
+
+Recover the five source files used by the deployed msm module. Each recovered file matches its source checksum in the installed module DWARF line tables. Preserve the single-slice packet selection and the diagnostic output exactly; this is a provenance checkpoint, not a new hardware behavior change.
+
+The working display also requires drm_display_helper.dsc_pps_bpp_double=1 on the kernel command line when DRM_DISPLAY_HELPER is built in. Archive configuration and the ordered patch series separately from the pristine upstream base. The earlier native_422/legacy-path hypothesis was disproved by runtime evidence.
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c   | 33 +++++++++++++++++++
+ .../gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c    | 25 ++++++++++++++
+ drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c     | 10 ++++++
+ drivers/gpu/drm/msm/dsi/dsi_host.c            | 33 ++++++++++++++++---
+ drivers/gpu/drm/msm/msm_fb.c                  | 21 ++++++++++++
+ 5 files changed, 118 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c
+index 590922c4f69bf9311e7787d2500386788da084bb..01b2d9c4e6a7db95958cef01d40ef062bc9ae930 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c
+@@ -361,4 +361,37 @@ void dpu_format_populate_addrs(struct drm_framebuffer *fb,
+ 		_dpu_format_populate_addrs_ubwc(fb, layout);
+ 	else
+ 		_dpu_format_populate_addrs_linear(fb, layout);
++
++	/*
++	 * zorn scanout-layout diag: SEE the exact geometry the DPU is told to
++	 * fetch on the 花屏 kernel. dpu_formats.c is byte-identical good<->bad,
++	 * so this output is deterministic from (fmt, fb w/h, base iova); the
++	 * only runtime variable that could regress is the modifier/plane-count
++	 * core-DRM negotiated into the fb. Rate-limited: first few, then sparse.
++	 */
++	{
++		static atomic_t _zdiag_n = ATOMIC_INIT(0);
++		int zc = atomic_inc_return(&_zdiag_n);
++
++		if (zc <= 8 || (zc % 240) == 0) {
++			pr_info("zorn-layout-diag[%d]: fb=%u %ux%u fourcc=0x%08x mod=0x%016llx "
++				"flags: ubwc=%d tile=%d yuv=%d dx=%d num_planes=%u\n",
++				zc, fb->base.id, fb->width, fb->height,
++				fmt->pixel_format, fb->modifier,
++				MSM_FORMAT_IS_UBWC(fmt), MSM_FORMAT_IS_TILE(fmt),
++				MSM_FORMAT_IS_YUV(fmt), MSM_FORMAT_IS_DX(fmt),
++				layout->num_planes);
++			pr_info("zorn-layout-diag[%d]:   P0 pitch=%u size=%u addr=0x%08x | "
++				"P1 pitch=%u size=%u addr=0x%08x\n",
++				zc, layout->plane_pitch[0], layout->plane_size[0],
++				layout->plane_addr[0], layout->plane_pitch[1],
++				layout->plane_size[1], layout->plane_addr[1]);
++			pr_info("zorn-layout-diag[%d]:   P2 pitch=%u size=%u addr=0x%08x | "
++				"P3 pitch=%u size=%u addr=0x%08x | total=%u base=0x%08x\n",
++				zc, layout->plane_pitch[2], layout->plane_size[2],
++				layout->plane_addr[2], layout->plane_pitch[3],
++				layout->plane_size[3], layout->plane_addr[3],
++				layout->total_size, msm_framebuffer_iova(fb, 0));
++		}
++	}
+ }
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+index 195f95af0585645a9da41c525b3abe9dbacd561b..1b8b458f27ec89dcb6e883eac8162db4460407ed 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+@@ -327,6 +327,31 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
+ 
+ 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_RC_CONFIG, data);
+ 
++	/*
++	 * zorn 7.3 hua-ping phase-3 (2026-10-02): host side pclk/byte_clk/fmt already
++	 * match Android (160/150, slice_per_pkt=1, native_422) yet still snows ->
++	 * isolate whether the DSC *compressed bitstream params* differ from the good
++	 * 7.2.7 panel blob (e1484ea2). Dump the complete PPS the DPU ships to the
++	 * panel decoder; if this matches Android's values, the divergence is upstream
++	 * in encoder timing, not the PPS table.
++	 */
++	pr_info("zorn-dppsprobe: ver 1.%u bpc=%u bpp=%u lbd=%u slice_chunk=%u slice_count=%u slice_w=%u slice_h=%u pic_w=%u pic_h=%u\n"
++		"  nfl_bpg=%u slice_bpg=%u init_xmit_delay=%u init_dec_delay=%u scale_inc=%u scale_dec=%u\n"
++		"  init_offset=%u final_offset=%u flbpg=%u sl2bpg=%u rc_model=%u rc_edge=%u fminqp=%u fmaxqp=%u\n"
++		"  native_422=%u native_420=%u convert_rgb=%u block_pred=%u\n",
++		dsc->dsc_version_minor, dsc->bits_per_component, dsc->bits_per_pixel,
++		dsc->line_buf_depth, dsc->slice_chunk_size, dsc->slice_count,
++		dsc->slice_width, dsc->slice_height, dsc->pic_width, dsc->pic_height,
++		dsc->nfl_bpg_offset, dsc->slice_bpg_offset,
++		dsc->initial_xmit_delay, dsc->initial_dec_delay,
++		dsc->scale_increment_interval, dsc->scale_decrement_interval,
++		dsc->initial_offset, dsc->final_offset,
++		dsc->first_line_bpg_offset, dsc->second_line_bpg_offset,
++		dsc->rc_model_size, dsc->rc_edge_factor,
++		dsc->flatness_min_qp, dsc->flatness_max_qp,
++		dsc->native_422, dsc->native_420, dsc->convert_rgb,
++		dsc->block_pred_enable);
++
+ 	/* program the dsc wrapper */
+ 	data = BIT(0); /* encoder enable */
+ 	if (dsc->native_422)
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+index 7b92082d35a642dfa3c4bd0016700b31cd9e8e26..d26be430c03df6f4f4ec5a58c5c43d209e5f610c 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+@@ -89,6 +89,12 @@ struct dpu_plane {
+ };
+ 
+ static const uint64_t supported_format_modifiers[] = {
++	/*
++	 * zorn 花屏 diag (2026-10-02): force-linear already exonerated UBWC
++	 * (LINEAR uncompressed scanout still 花屏). Restore QCOM_COMPRESSED so the
++	 * plane advertises the normal UBWC path (matching the good 7.2.7 config)
++	 * while we isolate the single variable slice_per_pkt=1 in dsi_host.c.
++	 */
+ 	DRM_FORMAT_MOD_QCOM_COMPRESSED,
+ 	DRM_FORMAT_MOD_LINEAR,
+ 	DRM_FORMAT_MOD_INVALID
+@@ -1840,6 +1846,10 @@ static struct drm_plane *dpu_plane_init_common(struct drm_device *dev,
+ 	if (IS_ERR(pdpu))
+ 		return ERR_CAST(pdpu);
+ 
++	/* zorn 花屏 diag: UBWC modifier restored; this build forces slice_per_pkt=1. */
++	pr_info("zorn-slice1-diag: plane pipe=%d type=%d modifiers[0]=0x%016llx (QCOM_COMPRESSED restored, slice_per_pkt forced to 1)\n",
++		pipe, type, supported_format_modifiers[0]);
++
+ 	/* cache local stuff for later */
+ 	plane = &pdpu->base;
+ 	pdpu->pipe = pipe;
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 2e40bfb955cd63343b1879575fe99287f985e233..6369db21798844f580677511d47d3a004d72f090 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -772,6 +772,18 @@ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+ 
+ 	DBG("pclk=%lu, bclk=%lu", msm_host->pixel_clk_rate,
+ 				msm_host->byte_clk_rate);
++
++	/*
++	 * zorn 7.3 clock-bandwidth probe (2026-10-02): slice_per_pkt=1 took effect
++	 * yet still snows, so isolate whether pclk/byte_clk are the regression.
++	 */
++	if (msm_host->dsc) {
++		pr_info("zorn-clkprobe: dsc(bpp_param=%lu src_bpp=%d) pclk_scaled=%lu byte_clk_rate=%lu byte_intf_clk_div_2=%u lanes=%u format=%u is_bonded=%u\n",
++			(unsigned long)dsi_dsc_uncompressed_bpp, dsi_dsc_src_bpp(msm_host->dsc),
++			msm_host->pixel_clk_rate, msm_host->byte_clk_rate,
++			msm_host->byte_intf_clk_div_2, msm_host->lanes, (unsigned)msm_host->format,
++			is_bonded_dsi);
++	}
+ }
+ 
+ int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+@@ -1106,6 +1118,12 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
+ 			reg_ctrl2, reg_ctrl2 & 0xffff,
+ 			slice_per_intf, dsc->slice_chunk_size, slice_per_pkt,
+ 			pkt_per_line, bytes_per_pkt);
++
++		pr_info("zorn-dscprobe: bytes/line=%u slice_chunk=%u slice_cnt=%u slice_per_pkt=%u pkt_per_line=%u bpc=%u hdisplay=%u htotal=%u vdisplay=%u vtotal=%u\n",
++			slice_per_intf * dsc->slice_chunk_size, dsc->slice_chunk_size, slice_per_intf,
++			slice_per_pkt, pkt_per_line, dsc->bits_per_component,
++			msm_host->mode->hdisplay, msm_host->mode->htotal,
++			msm_host->mode->vdisplay, msm_host->mode->vtotal);
+ 	} else {
+ 		reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_WC(bytes_per_pkt);
+ 		dsi_write(msm_host, REG_DSI_VIDEO_COMPRESSION_MODE_CTRL, reg);
+@@ -1854,10 +1872,17 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
+ 	msm_host->mode_flags = dsi->mode_flags;
+ 	if (dsi->dsc) {
+ 		msm_host->dsc = dsi->dsc;
+-		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
+-			msm_host->dsc_slice_per_pkt = dsi->dsc->slice_count;
+-		else
+-			msm_host->dsc_slice_per_pkt = 1;
++		/*
++		 * zorn 花屏 diag (2026-10-02): the good 7.2.7/7.2.8 mainline ran
++		 * slice_per_pkt=1 (two 720B DSC packets per line). 7.3 added the
++		 * panel's MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT flag + commit 970a1f1f6,
++		 * which flips this to slice_count (=2, one 1440B packet per line) --
++		 * the ONLY panel-driver delta between good and 花屏. Force it back to
++		 * the known-good 1 to test whether that flip is the regression. The
++		 * CMPR_MODE_CTRL pr_info in dsi_update_dsc_timing() confirms
++		 * slice_per_pkt 1 / pkt_per_line 2 actually took effect.
++		 */
++		msm_host->dsc_slice_per_pkt = 1;
+ 	}
+ 
+ 	if (msm_host->format == MIPI_DSI_FMT_RGB101010) {
+diff --git a/drivers/gpu/drm/msm/msm_fb.c b/drivers/gpu/drm/msm/msm_fb.c
+index 60c108d35d2a1c5ad55489a9925214979541ea80..2f47525385458d66573af2a8bafed80a3c858d0c 100644
+--- a/drivers/gpu/drm/msm/msm_fb.c
++++ b/drivers/gpu/drm/msm/msm_fb.c
+@@ -207,6 +207,27 @@ msm_framebuffer_init(struct drm_device *dev, const struct drm_format_info *info,
+ 
+ 	refcount_set(&msm_fb->dirtyfb, 1);
+ 
++	/*
++	 * zorn fb-create diag: SEE the as-allocated scanout geometry on the
++	 * 花屏 kernel at the moment the fb is created from userspace addfb2 —
++	 * the UPSTREAM input (fourcc / modifier / num_planes / per-plane
++	 * pitch+offset vs backing-bo size) that msm_framebuffer_init consumes.
++	 * msm_framebuffer_init is byte-identical good<->bad, so a difference
++	 * here would mean core-DRM / mesa negotiated a different buffer.
++	 * Low volume (once per fb object), so always-on, no rate limit.
++	 */
++	{
++		int zi;
++
++		pr_info("zorn-fb-diag: fb=%u %ux%u fourcc=0x%08x mod=0x%016llx num_planes=%d\n",
++			fb->base.id, mode_cmd->width, mode_cmd->height,
++			mode_cmd->pixel_format, mode_cmd->modifier[0], n);
++		for (zi = 0; zi < n; zi++)
++			pr_info("zorn-fb-diag:   plane %d: pitch=%u offset=%u cpp=%u bo_size=%zu\n",
++				zi, mode_cmd->pitches[zi], mode_cmd->offsets[zi],
++				info->cpp[zi], bos[zi]->size);
++	}
++
+ 	drm_dbg_state(dev, "create: FB ID: %d (%p)\n", fb->base.id, fb);
+ 
+ 	return fb;

@@ -1,0 +1,51 @@
+From 2a1f6733fb86daf6068680c7932ad0e6f3930e7c Mon Sep 17 00:00:00 2001
+From: xingguangcuican6666 <xingguangcuican666@foxmail.com>
+Date: Fri, 2 Oct 2026 01:04:54 +0800
+Subject: [PATCH 5/6] =?UTF-8?q?soc:=20qcom:=20ubwc:=20diag=20-=20force=20s?=
+ =?UTF-8?q?tatic=20hbb,=20log=20SMEM=20hbb=20(zorn=20=E8=8A=B1=E5=B1=8F)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ drivers/soc/qcom/ubwc_config.c | 26 ++++++++++++--------------
+ 1 file changed, 12 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/soc/qcom/ubwc_config.c b/drivers/soc/qcom/ubwc_config.c
+index 23901a4c51f7305d95ac65e2a651fc557863a4ac..02bee7dbdfa80dc61e70f679b40349759b7ffd9a 100644
+--- a/drivers/soc/qcom/ubwc_config.c
++++ b/drivers/soc/qcom/ubwc_config.c
+@@ -196,21 +196,19 @@ const struct qcom_ubwc_cfg_data *qcom_ubwc_config_get_data(void)
+ 	}
+ 
+ 	hbb = qcom_smem_dram_get_hbb();
+-	if (hbb == -ENODATA) {
+-		/* Lack of HBB data is OK - it was only introduced later */
+-		return data;
+-	} else if (hbb < 0) {
+-		pr_err("Couldn't get HBB data from SMEM: %d\n", hbb);
+-		return ERR_PTR(hbb);
+-	}
+-
+-	cfg = kmemdup(data, sizeof(*data), GFP_KERNEL);
+-	if (!cfg)
+-		return ERR_PTR(-ENOMEM);
+-
+-	cfg->highest_bank_bit = hbb;
+ 
+-	return cfg;
++	/*
++	 * zorn 花屏 diag (2026-10-02): v7.3 added this runtime SMEM override of
++	 * highest_bank_bit; the working v7.2.8 tree used the static per-SoC hbb
++	 * unconditionally (sm8650 -> hbb 16). Log both values and FORCE the
++	 * static one, restoring v7.2.8 behaviour, to test whether this override
++	 * is the AR30/UBWC garbled-display root cause. Revert to re-enable the
++	 * override once confirmed.
++	 */
++	pr_info("zorn-ubwc-diag: static hbb=%d, SMEM hbb=%d -> forcing static (override bypassed)\n",
++		data->highest_bank_bit, hbb);
++
++	return data;
+ }
+ EXPORT_SYMBOL_GPL(qcom_ubwc_config_get_data);
+ 

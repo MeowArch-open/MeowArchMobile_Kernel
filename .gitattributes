@@ -1,0 +1,2 @@
+# Mail patches contain significant context prefixes and historical whitespace.
+*.patch -whitespace

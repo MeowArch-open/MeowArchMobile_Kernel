@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "kernel_repository": "https://github.com/MeowArch-open/MeowArchMobile_Kernel.git",
+  "upstream_repository": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+  "upstream_tag": "v7.3-rc5",
+  "upstream_tag_object": "5a956dde5526a634dca7ccad27c051ebcc306089",
+  "base_tag": "v7.3-rc5-meowarch-base",
+  "base_commit": "72d3fcf802c45d00b300f25b848a93c3a2bd7c7e",
+  "base_tree": "b9e9f22cee46d79f64ee1d888a80ca0d04dd8df6",
+  "snapshot_branch": "v7.3-rc5-zorn-tested",
+  "snapshot_tag": "v7.3-rc5-meowarch1",
+  "snapshot_commit": "13c62c8115f60347320b2faa543a9838f0b63de4",
+  "snapshot_tree": "1871f732bbdf403a72a9c36a47f4d7dbb07e17f3",
+  "patch_branch": "patches/zorn-v7.3-rc5",
+  "patch_commits": [
+    "6b73d941538fb01e8e0ce3022e3190b91ee89577",
+    "c1f0e26ef88f1f235670d09387563c12fbff6b3f",
+    "970a1f1f69c536ee673e1074f43551e34cdfce59",
+    "b90a71b54639cb2424ccb0052cb076e89bb10384",
+    "2a1f6733fb86daf6068680c7932ad0e6f3930e7c",
+    "13c62c8115f60347320b2faa543a9838f0b63de4"
+  ],
+  "config_sha256": "b0e7494f6c31fec304547d701a0545ea941dca386a9aa43168156a6ea07bc8aa",
+  "tested_release": "7.3.0-rc5-gpuwifi-00005-g2a1f6733fb86-dirty",
+  "tested_image_sha256": "fe1558956b1c07f4c5926cb06bae33dd02f9b648391f53e8800bf5a22d78cf48",
+  "tested_msm_module_sha256": "b697f2567d983c439cb1ab55349f7954f33f138c00732198f871bb1927580aa9",
+  "tested_qcomtee_module_sha256": "8321103e35b716a34ecb6ed4377ce76f3c26d69681414469eb1c4dcdac9e93b6",
+  "toolchain": "clang 22.1.8, LLD 22.1.8; ARCH=arm64 LLVM=1",
+  "required_cmdline": [
+    "drm_display_helper.dsc_pps_bpp_double=1"
+  ],
+  "source_provenance": {
+    "installed_msm_dwarf_source_paths_checked": 677,
+    "recovered_files": [
+      {
+        "path": "drivers/gpu/drm/msm/disp/dpu1/dpu_formats.c",
+        "expected_dwarf_md5": [
+          "419ac88e85edb10cded6023d4945be53"
+        ],
+        "recovered_md5": "419ac88e85edb10cded6023d4945be53",
+        "sha256": "8e2dccca544aaabc2fe8c8d45758cb102bcda04b47d8b4293b93d6a2f1b16575"
+      },
+      {
+        "path": "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c",
+        "expected_dwarf_md5": [
+          "7ae86369ca607598b627ab42fea9e414"
+        ],
+        "recovered_md5": "7ae86369ca607598b627ab42fea9e414",
+        "sha256": "96072f60beb249d75dfbbb2c8303184db3e7b03e21ef7a782cfc4133c7e91856"
+      },
+      {
+        "path": "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c",
+        "expected_dwarf_md5": [
+          "1213d50eaa6d66cddc9e7545d40b09fe"
+        ],
+        "recovered_md5": "1213d50eaa6d66cddc9e7545d40b09fe",
+        "sha256": "b7076ea75918b42f035a535c54d7b18a8c0aebf817ab5c9019c11144f88cb9f1"
+      },
+      {
+        "path": "drivers/gpu/drm/msm/dsi/dsi_host.c",
+        "expected_dwarf_md5": [
+          "110fd39769799e4f1c7255d153d9e85f"
+        ],
+        "recovered_md5": "110fd39769799e4f1c7255d153d9e85f",
+        "sha256": "532b1f77540e247751ae696fb214e4d5849546eb56caf004a35840410bd7d9f5"
+      },
+      {
+        "path": "drivers/gpu/drm/msm/msm_fb.c",
+        "expected_dwarf_md5": [
+          "fdba8b8fcf0671cc501fba0b76818586"
+        ],
+        "recovered_md5": "fdba8b8fcf0671cc501fba0b76818586",
+        "sha256": "ef1a7a471691f1100b8fc3524ae9c4b0168400a5e3622fe1905d7e4313694ffa"
+      }
+    ],
+    "scope": "The five recovered source files match the installed msm.ko DWARF MD5s. Other checked source paths match the original committed tree. This is source provenance, not a new binary-reproducible build claim."
+  },
+  "validation_scope": "User reports normal operation on the deployed build after PPS and storage/runtime cleanup. No new hardware flash or stability stress run for this archival publication.",
+  "diagnostics_retained": true
+}

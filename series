@@ -1,0 +1,6 @@
+patches/0001-zorn-local-patches-on-7.0.12-display-audio-modem-tou.patch
+patches/0002-camss-dev_info-instrumentation-for-csid-csiphy-MIPI-.patch
+patches/0003-drm-msm-honor-panel-DSC-all-slices-packet-flag.patch
+patches/0004-ASoC-qcom-keep-the-extended-TDM-DAI-ops.patch
+patches/0005-soc-qcom-ubwc-diag-force-static-hbb-log-SMEM-hbb-zor.patch
+patches/0006-drm-msm-preserve-the-tested-zorn-7.3-rc5-display-sna.patch

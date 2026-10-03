@@ -1,0 +1,29 @@
+From b90a71b54639cb2424ccb0052cb076e89bb10384 Mon Sep 17 00:00:00 2001
+From: xingguangcuican6666 <xingguangcuican666@foxmail.com>
+Date: Thu, 1 Oct 2026 18:42:19 +0800
+Subject: [PATCH 4/6] ASoC: qcom: keep the extended TDM DAI ops
+
+---
+ sound/soc/qcom/qdsp6/q6apm-lpass-dais.c | 9 ---------
+ 1 file changed, 9 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+index 19ebe4cc2c1dacf78cfc2d84539f5413d1c0d048..44f55ff0069d5b0392e0cfeefe69274d22a2398a 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
++++ b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+@@ -526,15 +526,6 @@ static const struct snd_soc_dai_ops q6i2s_ops = {
+ 	.trigger	= q6apm_lpass_dai_trigger,
+ };
+ 
+-static const struct snd_soc_dai_ops q6tdm_ops = {
+-	.prepare	= q6apm_lpass_dai_prepare,
+-	.startup	= q6apm_lpass_dai_startup,
+-	.shutdown	= q6apm_lpass_dai_shutdown,
+-	.set_channel_map  = q6dma_set_channel_map,
+-	.hw_params        = q6dma_hw_params,
+-	.set_fmt	= q6i2s_set_fmt,
+-};
+-
+ static const struct snd_soc_dai_ops q6hdmi_ops = {
+ 	.prepare	= q6apm_lpass_dai_prepare,
+ 	.startup	= q6apm_lpass_dai_startup,

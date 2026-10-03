@@ -1,0 +1,32 @@
+# Example for the existing zorn Mu-UEFI -> ESP -> Arch boot chain.
+# Substitute @ESP_UUID@ and @ROOT_PARTUUID@ before using this file.
+# Supply the existing recovery and normal DTBs; they are not kernel patches.
+set timeout=10
+set default=1
+set pager=0
+
+insmod part_gpt
+insmod fat
+insmod fdt
+insmod search_fs_uuid
+search --no-floppy --fs-uuid --set=root @ESP_UUID@
+
+set common="root=PARTUUID=@ROOT_PARTUUID@ rw rootwait console=tty1 earlycon=efifb loglevel=4 log_buf_len=32M clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=0"
+
+menuentry "0: recovery (simplefb, msm blacklisted)" {
+    devicetree /dtb/zorn.dtb
+    linux /Image $common modprobe.blacklist=msm
+    boot
+}
+
+menuentry "1: normal" {
+    devicetree /dtb/zorn-cam.dtb
+    linux /Image $common deferred_probe_timeout=30 drm_display_helper.dsc_pps_bpp_double=1
+    boot
+}
+
+menuentry "2: test" {
+    devicetree /dtb/zorn-cam.dtb
+    linux /Image $common deferred_probe_timeout=30 drm_display_helper.dsc_pps_bpp_double=1
+    boot
+}
